@@ -1,5 +1,6 @@
+import numpy as np
 
-#!/usr/bin/python
+# !/usr/bin/python
 # -*- coding:utf8 -*-
 
 from common import *
@@ -7,6 +8,8 @@ from dataset import get_data
 from func import Func
 from latent_ode import LatentODE
 from dataset import dataloader
+from sklearn.metrics import mean_squared_error
+
 
 def main(
     dataset_size=10000,
@@ -79,6 +82,8 @@ def main(
             sample_y = model.sample(test_data, key=sample_key)
             sample_t = np.asarray(test_data.predict_t)
             sample_y = np.asarray(sample_y)
+            print(f"RMSE: {np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y))}")
+
             ax.plot(sample_t, sample_y[:, 0])
             ax.plot(sample_t, sample_y[:, 1])
             ax.set_xticks([])
