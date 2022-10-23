@@ -3,20 +3,25 @@
 from common import *
 
 def get_data(dataset_size, *, key):
+    TIME_SAMPLE_NUM = 20
     ykey, tkey1, tkey2 = jrandom.split(key, 3)
 
     y0 = jrandom.normal(ykey, (dataset_size, 2))
+    u0 = jnp.zeros((dataset_size, 3))
 
     t0 = 0
     t1 = 2 + jrandom.uniform(tkey1, (dataset_size,))
-    ts = jrandom.uniform(tkey2, (dataset_size, 20)) * (t1[:, None] - t0) + t0
+    ts = jrandom.uniform(tkey2, (dataset_size, TIME_SAMPLE_NUM)) * (t1[:, None] - t0) + t0
     ts = jnp.sort(ts)
     dt0 = 0.1
+
+    def func_u(t, y, args):
+        return t
 
     def func(t, y, args):
         return jnp.array([[-0.1, 1.3], [-1, -0.1]]) @ y
 
-    def solve(ts, y0):
+    def solve_y(ts, y0):
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(func),
             diffrax.Tsit5(),
@@ -28,9 +33,22 @@ def get_data(dataset_size, *, key):
         )
         return sol.ys
 
-    ys = jax.vmap(solve)(ts, y0)
+    def solve_u(ts, y0):
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(func_u),
+            diffrax.Tsit5(),
+            ts[0],
+            ts[-1],
+            dt0,
+            y0,
+            saveat=diffrax.SaveAt(ts=ts),
+        )
+        return sol.ys
 
-    return ts, ys
+    ys = jax.vmap(solve_y)(ts, y0)
+    us = jax.vmap(solve_u)(ts, u0)
+
+    return ts, ys, us
 
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
