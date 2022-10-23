@@ -9,7 +9,8 @@ from func import Func
 from latent_ode import LatentODE
 from dataset import dataloader
 from sklearn.metrics import mean_squared_error
-
+import torch
+from numpy import *
 
 from dataset import select_dataset
 
@@ -18,6 +19,7 @@ def main(
     batch_size=256,
     lr=1e-2,
     steps=250,
+    test_steps=1000,
     save_every=50,
     hidden_size=16,
     latent_size=16,
@@ -28,11 +30,25 @@ def main(
     key = jrandom.PRNGKey(seed)
     data_key, model_key, loader_key, train_key, sample_key = jrandom.split(key, 5)
 
+    jnp_train, jnp_test = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
 
-    # ts, ys = get_data(dataset_size, key=data_key)
-    # ys_train, ys_val, ys_test = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
-    # print(len(ys_train))
-    ts, ys, us = get_data(dataset_size, key=data_key)
+    ts_history, ts_forward, external_input_history, external_input_forward, \
+    observation_history, observation_forward = jnp_train
+
+    ts_history_test, ts_forward_test, external_input_history_test, external_input_forward_test, \
+    observation_history_test, observation_forward_test = jnp_test
+    # 拼接全length的jnp array
+    ts = torch.cat([torch.tensor(ts_history.tolist()),
+                    torch.tensor(ts_forward.tolist())], dim=1)
+    ts = jnp.array(ts.numpy().tolist())
+    us = torch.cat([torch.tensor(external_input_history.tolist()),
+                    torch.tensor(external_input_forward.tolist())], dim=1)
+    us = jnp.array(us.numpy().tolist())
+    ys = torch.cat([torch.tensor(observation_history.tolist()),
+                    torch.tensor(observation_forward.tolist())], dim=1)
+    ys = jnp.array(ys.numpy().tolist())
+
+    # ts, ys, us = get_data(dataset_size, key=data_key)
 
 
     model = LatentODE(
@@ -81,24 +97,37 @@ def main(
         print(f"Step: {step}, Loss: {value}, Computation time: {end - start}")
 
         if (step % save_every) == 0 or step == steps - 1:
-            ax = next(axs)
+            # ax = next(axs)
             # Sample over a longer time interval than we trained on. The model will be
             # sufficiently good that it will correctly extrapolate!
-            test_data = SampleDataWrapper(ts_i[0], ys_i[0], us_i[0], ts_i[0] + 2, ys_i[0], us_i[0])
 
-            sample_y = model.sample(test_data, key=sample_key)
-            sample_t = np.asarray(test_data.predict_t)
-            sample_y = np.asarray(sample_y)
-            print(f"RMSE: {np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y))}")
+            acc_rmse = []
+            for test_step, (ts_history_test_i, ts_forward_test_i, external_input_history_test_i,
+                            external_input_forward_test_i, observation_history_test_i,
+                            observation_forward_test_i) in zip(
+                    range(test_steps), dataloader((ts_history_test, ts_forward_test, external_input_history_test,
+                                                   external_input_forward_test, observation_history_test,
+                                                   observation_forward_test), batch_size, key=loader_key)
+            ):
 
-            ax.plot(sample_t, sample_y[:, 0])
-            ax.plot(sample_t, sample_y[:, 1])
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_xlabel("t")
+                test_data = SampleDataWrapper(ts_history_test_i, ts_forward_test_i, external_input_history_test_i,
+                            external_input_forward_test_i, observation_history_test_i,
+                            observation_forward_test_i)
 
-    plt.savefig("latent_ode.png")
-    plt.show()
+                sample_y = model.sample(test_data, key=sample_key)
+                sample_t = np.asarray(test_data.predict_t)
+                sample_y = np.asarray(sample_y)
+                acc_rmse.append(np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y)))
+            # print(f"RMSE: {np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y))}")
+            print(f"RMSE: {mean(acc_rmse)}")
+            # ax.plot(sample_t, sample_y[:, 0])
+            # ax.plot(sample_t, sample_y[:, 1])
+            # ax.set_xticks([])
+            # ax.set_yticks([])
+            # ax.set_xlabel("t")
+
+    # plt.savefig("latent_ode.png")
+    # plt.show()
 
 
 if __name__ == "__main__":

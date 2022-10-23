@@ -69,6 +69,7 @@ def dataloader(arrays, batch_size, *, key):
         end = batch_size
         while start < dataset_size:
             batch_perm = perm[start:end]
+            # TODO: 在这里再变为jnp
             yield tuple(array[batch_perm] for array in arrays)
             start = end
             end = start + batch_size
@@ -87,11 +88,9 @@ def select_dataset(dataset_name, ct_time, sp):
 
         train_dataset = CstrDataset(pd.read_csv(train_path), history_length + forward_length, step=dataset_window)
         # val_dataset = CstrDataset(pd.read_csv(val_path), history_length + forward_length, step=dataset_window)
-        # test_dataset = CstrDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
+        test_dataset = CstrDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
         collate_fn = None if not ct_time else \
             CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
-        train_loader = DataLoader(train_dataset, batch_size=100000,
-                                  shuffle=True, collate_fn=collate_fn)
 
     elif dataset_name == 'winding':
         train_path = 'data/winding/winding_train.csv'
@@ -105,11 +104,9 @@ def select_dataset(dataset_name, ct_time, sp):
 
         train_dataset = WindingDataset(pd.read_csv(train_path), history_length + forward_length, step=dataset_window)
         # val_dataset = WindingDataset(pd.read_csv(val_path), history_length + forward_length, step=dataset_window)
-        # test_dataset = WindingDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
+        test_dataset = WindingDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
         collate_fn = None if not ct_time else \
             CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
-        train_loader = DataLoader(train_dataset, batch_size=100000,
-                                  shuffle=True, collate_fn=collate_fn)
 
     elif dataset_name == 'thickener':
         data_dir = 'data/west'
@@ -127,37 +124,46 @@ def select_dataset(dataset_name, ct_time, sp):
                                        step=dataset_window, dilation=dilation)
         # val_dataset = WesternDataset(data_csvs[train_size:train_size + val_size], history_length + forward_length,
         #                                step=dataset_window, dilation=dilation)
-        # test_dataset = WesternDataset(data_csvs[-test_size:], history_length + forward_length,
-        #                                step=dataset_window, dilation=dilation)
+        test_dataset = WesternDataset(data_csvs[-test_size:], history_length + forward_length,
+                                    step=dataset_window, dilation=dilation)
 
         collate_fn = None if not ct_time else \
             CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
-        train_loader = DataLoader(train_dataset, batch_size=100000,
-                                  shuffle=True, collate_fn=collate_fn)
 
     else:
         raise NotImplementedError
 
-    for i, data in enumerate(train_loader):
-        external_input_history, external_input_forward, observation_history, observation_forward = data
-    external_input_history, ts_history = external_input_history.split([input_dim, 1], dim=-1)
-    external_input_forward, ts_forward = external_input_forward.split([input_dim, 1], dim=-1)
-    # external_input_history = torch.cat([external_input_history, tp_history], dim=-1)
-    # external_input_forward = torch.cat([external_input_forward, tp_forward], dim=-1)
+    def get_jnp_list(data_loader):
+        for i, data in enumerate(data_loader):
+            external_input_history, external_input_forward, observation_history, observation_forward = data
+        external_input_history, ts_history = external_input_history.split([input_dim, 1], dim=-1)
+        external_input_forward, ts_forward = external_input_forward.split([input_dim, 1], dim=-1)
+        # external_input_history = torch.cat([external_input_history, tp_history], dim=-1)
+        # external_input_forward = torch.cat([external_input_forward, tp_forward], dim=-1)
 
-    ts_history = jnp.array(ts_history.squeeze(dim=-1).numpy().tolist())
-    ts_forward = jnp.array(ts_forward.squeeze(dim=-1).numpy().tolist())
-    external_input_history = jnp.array(external_input_history.numpy().tolist())
-    external_input_forward = jnp.array(external_input_forward.numpy().tolist())
-    observation_history = jnp.array(observation_history.numpy().tolist())
-    observation_forward = jnp.array(observation_forward.numpy().tolist())
+        ts_history = torch.clip(ts_history, 1e-6, 1e6)
+        ts_forward = torch.clip(ts_forward, 1e-6, 1e6)
+        ts_history = torch.cumsum(ts_history, dim=1)
+        ts_forward = torch.cumsum(ts_forward, dim=1)
+        ts_history = jnp.array(ts_history.squeeze(dim=-1).numpy().tolist())
+        ts_forward = jnp.array(ts_forward.squeeze(dim=-1).numpy().tolist())
+        external_input_history = jnp.array(external_input_history.numpy().tolist())
+        external_input_forward = jnp.array(external_input_forward.numpy().tolist())
+        observation_history = jnp.array(observation_history.numpy().tolist())
+        observation_forward = jnp.array(observation_forward.numpy().tolist())
 
-    jnp_train = [ts_history, ts_forward, external_input_history, external_input_forward,
-                 observation_history, observation_forward]
+        return [ts_history, ts_forward, external_input_history, external_input_forward,
+                            observation_history, observation_forward]
 
+    train_loader = DataLoader(train_dataset, batch_size=100000,
+                              shuffle=True, num_workers=8, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=100000,
+                             shuffle=True, num_workers=8, collate_fn=collate_fn)
 
+    jnp_train = get_jnp_list(train_loader)
+    jnp_test = get_jnp_list(test_loader)
 
-    return jnp_train
+    return jnp_train, jnp_test
 
 
 class CstrDataset(Dataset):
@@ -386,7 +392,7 @@ class CTSample:
         )
 
         external_input_forward, observation_forward = data_rasample(
-            external_input[:, self.forward_length:, :], observation[:, self.forward_length:, :]
+            external_input[:, self.history_length:, :], observation[:, self.history_length:, :]
         )
         # observation = add_tp(observation, dt)
         # return external_input, observation, external_input_origin, observation_origin
