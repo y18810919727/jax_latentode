@@ -9,4 +9,4 @@ class Func(eqx.Module):
     mlp: eqx.nn.MLP
 
     def __call__(self, t, y, args):
-        return self.scale * self.mlp(y)
+        return self.scale * self.mlp(jnp.concatenate([y, args[0].evaluate(t)], axis=0))
