@@ -8,6 +8,8 @@ from func import Func
 from latent_ode import LatentODE
 from dataset import dataloader
 
+from dataset import select_dataset
+
 def main(
     dataset_size=10000,
     batch_size=256,
@@ -23,7 +25,9 @@ def main(
     key = jrandom.PRNGKey(seed)
     data_key, model_key, loader_key, train_key, sample_key = jrandom.split(key, 5)
 
-    ts, ys = get_data(dataset_size, key=data_key)
+    # ts, ys = get_data(dataset_size, key=data_key)
+    ys_train, ys_val, ys_test = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
+    print(len(ys_train))
 
     model = LatentODE(
         data_size=ys.shape[-1],
