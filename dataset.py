@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from common import *
-from common import subsample_indexes, to_timestamp
+from common import subsample_indexes, onceexp
 
 
 def get_data(dataset_size, *, key):
@@ -106,7 +106,7 @@ def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
         # val_dataset = WindingDataset(pd.read_csv(val_path), history_length + forward_length, step=dataset_window)
         test_dataset = WindingDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
 
-    elif dataset_name == 'thickener':
+    elif dataset_name == 'west':
         data_dir = 'data/west'
         data_csvs = [pd.read_csv(os.path.join(data_dir, file)) for file in os.listdir(data_dir)]
         dataset_split = [0.6, 0.2, 0.2]
@@ -124,8 +124,31 @@ def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
         #                                step=dataset_window, dilation=dilation)
         test_dataset = WesternDataset(data_csvs[-test_size:], history_length + forward_length,
                                     step=dataset_window, dilation=dilation)
-    else:
-        raise NotImplementedError
+    elif dataset_name == 'thickener':
+        data_path = 'data/south_con/thickener_1.npy'
+        history_length = 30
+        forward_length = 60
+        io = '4-1'
+        step = 10
+        input_dim = 4
+        output_dim = 1
+        smooth_alpha = 0.3
+
+        data = np.load(data_path, allow_pickle=True)
+
+        train_dataset = SoutheastThickener(data,
+                                           length=history_length + forward_length,
+                                           step=step,
+                                           dataset_type='train', io=io,
+                                           smooth_alpha=smooth_alpha
+                                           )
+
+        test_dataset = SoutheastThickener(data,
+                                           length=history_length + forward_length,
+                                           step=step,
+                                           dataset_type='test', io=io,
+                                           smooth_alpha=smooth_alpha
+                                           )
 
     collate_fn = None if not ct_time else \
         CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
@@ -342,6 +365,100 @@ class WesternDataset(Dataset):
         observation = pressure
 
         return external_input, np.expand_dims(observation, axis=1)
+
+
+class SoutheastThickener(Dataset):
+    def __init__(self, data, length=90, step=5, dilation=1, dataset_type=None, ratio=None, io=None, seed=0,
+                 smooth_alpha=0.3):
+        """
+
+        Args:
+            data: data array
+            length: history + predicted
+            step:  size of moving step
+            dilation:
+            dataset_type:  train, val, test
+            ratio:  default: 0.6, 0.2, 0.2
+            io: default 4-1
+            seed: default 0
+        """
+
+        if not isinstance(seed, int):
+            seed = 0
+
+        if dataset_type is None:
+            dataset_type = 'train'
+
+        if ratio is None:
+            ratio = [0.6, 0.2, 0.2]
+
+        if io is None:
+            io = '4-1'
+
+        if io == '4-1':
+            # 进料浓度、出料浓度、进料流量、出料流量 -> 泥层压力
+            self.io = [[0, 1, 2, 3], [4]]
+        elif io == '3-2':
+            # 进料浓度、进料流量、出料流量 -> 出料浓度 、泥层压力
+            self.io = [[0, 2, 3], [1, 4]]
+        else:
+            raise NotImplementedError()
+
+        # region old version
+        # data = np.array(data, dtype=np.float32)
+        # endregion
+
+        # region new version
+        def iter(data):
+            for k, v in data.item().items():
+                for i in range(0, v.shape[0] - length * dilation + 1, step):
+                    yield v[i:i+length]
+        data = np.stack([x for x in iter(data)], axis=0)
+        data = np.array(data, dtype=np.float32)
+        # endregion
+
+        self.smooth_alpha = smooth_alpha
+
+        for _ in self.io[1]:
+            # data.shape (N, 90, 5)
+            data[:, :, int(_)] = onceexp(data[:, :, int(_)].transpose(), self.smooth_alpha).transpose()
+
+        data, self.mean, self.std = self.normalize(data)
+
+        data = data[::step]
+        L = data.shape[0]
+
+        train_size, val_size = int(L*ratio[0]), int(L*ratio[1])
+        test_size = L - train_size - val_size
+
+        d1, d2, d3 = torch.utils.data.random_split(data, (train_size, val_size, test_size),
+                                                   generator=torch.Generator().manual_seed(seed))
+        if dataset_type == 'train':
+            self.reserved_dataset = d1
+        elif dataset_type == 'val':
+            self.reserved_dataset = d2
+        elif dataset_type == 'test':
+            self.reserved_dataset = d3
+        else:
+            raise AttributeError()
+
+        self.dilation = dilation
+        self.step = step
+
+    def normalize(self, data):
+        mean = np.mean(data, axis=(0, 1))
+        std = np.std(data, axis=(0, 1))
+        return (data - mean) / std, mean, std
+
+    def __len__(self):
+        return len(self.reserved_dataset)
+
+    def __getitem__(self, item):
+        data_tuple = self.reserved_dataset.__getitem__(item)
+        # data_tuple = self.reserved_data[item * self.step]
+        data_in, data_out = [data_tuple[:, self.io[_]] for _ in range(2)]
+
+        return data_in, data_out
 
 
 class CTSample:

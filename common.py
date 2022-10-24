@@ -42,6 +42,16 @@ def to_timestamp(dt_str, tz_str='UTC+7:00'):
     return utc_dt.timestamp()
 
 
+def onceexp(data,a):#y一次指数平滑法
+    x=[]
+    t=data[0]
+    x.append(t)
+    for i in range(len(data)-1):
+        t=t+a*(data[i+1]-t)
+        x.append(t)
+    return np.stack(x)
+
+
 class SampleDataWrapper:
     def __init__(self, observe_t, observe_y, observe_u, predict_t, predict_y, predict_u):
         self.observe_y = observe_y

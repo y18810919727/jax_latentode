@@ -59,7 +59,7 @@ def main(
     key = jrandom.PRNGKey(seed)
     data_key, model_key, loader_key, train_key, sample_key = jrandom.split(key, 5)
 
-    train_all, test_all = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
+    train_all, test_all = select_dataset(dataset_name='thickener', ct_time=True, sp=0.5)
 
     ts_train, us_train, ys_train = [torch.cat([train_all[i], train_all[i+1]], dim=1) for i in range(0, 6, 2)]
 
@@ -180,7 +180,7 @@ def main(
                 print('best_test update at epoch = {}'.format(epoch))
             if epoch - best_dev_epoch > max_epochs_stop and epoch > min_epochs:
                 print('Early stopping at epoch = {}'.format(epoch))
-
+                break
 
     # plt.savefig("latent_ode.png")
     # plt.show()
