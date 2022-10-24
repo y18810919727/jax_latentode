@@ -127,7 +127,7 @@ class LatentSDE(torchsde.SDEIto):
 
         # Approximate posterior drift: Takes in 2 positional encodings and the state.
         self.net = nn.Sequential(
-            nn.Linear(h_size, y_size, u_size, 2*h_size),
+            nn.Linear(h_size+y_size+u_size, 2*h_size),
             nn.Tanh(),
             nn.Linear(2*h_size, 2*h_size),
             nn.Tanh(),
