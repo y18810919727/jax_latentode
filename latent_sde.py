@@ -17,7 +17,7 @@
 
 """Latent SDE fit to a single time series with uncertainty quantification."""
 import argparse
-from common import Intepolation, RMSE_torch, sdeint_fn_batched
+from common import RMSE_torch, sdeint_fn_batched, TimeRecorder
 from dataset import select_dataset
 
 import logging
@@ -128,14 +128,12 @@ class LatentSDE(torchsde.SDEIto):
         # self.register_buffer("sigma", torch.tensor([[sigma]]))
 
         # p(y0).
-        self.register_buffer("py0_mean", nn.Parameter(torch.zeros(h_size), requires_grad=True))
-        self.register_buffer("py0_logvar", nn.Parameter(torch.zeros(h_size), requires_grad=True))
+        self.register_buffer("py0_mean", nn.Parameter(torch.zeros((1, h_size)), requires_grad=True))
+        self.register_buffer("py0_logvar", nn.Parameter(torch.zeros((1, h_size)), requires_grad=True))
 
         # Approximate posterior drift: Takes in 2 positional encodings and the state.
         self.net = nn.Sequential(
             nn.Linear(h_size+y_size+u_size, 2*h_size),
-            nn.Tanh(),
-            nn.Linear(2*h_size, 2*h_size),
             nn.Tanh(),
             nn.Linear(2*h_size, h_size)
         )
@@ -144,24 +142,28 @@ class LatentSDE(torchsde.SDEIto):
         self.net[-1].bias.data.fill_(0.)
 
         # q(y0).
-        self.qy0_mean = nn.Parameter(torch.zeros(h_size), requires_grad=True)
-        self.qy0_logvar = nn.Parameter(torch.zeros(h_size), requires_grad=True)
+        self.qy0_mean = nn.Parameter(torch.zeros((1, h_size)), requires_grad=True)
+        self.qy0_logvar = nn.Parameter(torch.zeros((1, h_size)), requires_grad=True)
 
         self.h2y = nn.Sequential(
             nn.Linear(h_size, 2*h_size),
             nn.Tanh(),
-            nn.Linear(2*h_size, y_size)
+            nn.Linear(2*h_size, 2*y_size)
         )
 
     def update_u(self, ts, u):
-        if ts.ndim == 2:
-            ts = ts.unsqueeze(dim=-1)
-        self.u_inter = KernelInterpolation(ts, u)
+        if args.inter == 'gp':
+            from interpolation import KernelInterpolation as Interpolation
+        else:
+            from common import Interpolation
+        self.u_inter = Interpolation(ts, u)
 
     def update_y(self, ts, y):
-        if ts.ndim == 2:
-            ts = ts.unsqueeze(dim=-1)
-        self.y_inter = KernelInterpolation(ts, y)
+        if args.inter == 'gp':
+            from interpolation import KernelInterpolation as Interpolation
+        else:
+            from common import Interpolation
+        self.y_inter = Interpolation(ts, y)
 
     def f(self, t, h):  # Approximate posterior drift.
         # if t.dim() == 0:
@@ -187,12 +189,12 @@ class LatentSDE(torchsde.SDEIto):
         return torch.cat([f, f_logqp], dim=1)
 
     def g_aug(self, t, y):  # Diffusion for augmented dynamics with logqp term.
-        y = y[:, :self.h_size]
-        g = self.g(t, y)
+        h = y[:, :self.h_size]
+        g = self.g(t, h)
         g_logqp = torch.zeros_like(y[:, self.h_size:])
         return torch.cat([g, g_logqp], dim=1)
 
-    def forward(self, ts, ys, us, batch_size, eps=None):
+    def forward(self, ts, us, ys, batch_size, eps=None):
         eps = torch.randn(batch_size, self.h_size).to(self.qy0_std) if eps is None else eps
         y0 = self.qy0_mean + eps * self.qy0_std
         qy0 = distributions.Normal(loc=self.qy0_mean, scale=self.qy0_std)
@@ -202,20 +204,19 @@ class LatentSDE(torchsde.SDEIto):
         self.update_u(ts, us)
         self.update_y(ts, ys)
         aug_y0 = torch.cat([y0, torch.zeros(batch_size, 1).to(y0)], dim=1)
-        # aug_ys = sdeint_fn(
-        #     sde=self,
-        #     y0=aug_y0,
-        #     ts=ts,
-        #     method=args.method,
-        #     dt=args.dt,
-        #     adaptive=args.adaptive,
-        #     rtol=args.rtol,
-        #     atol=args.atol,
-        #     names={'drift': 'f_aug', 'diffusion': 'g_aug'}
-        # )
-        aug_ys = sdeint_fn_batched(self, aug_y0, ts, sdeint_fn, method=args.method, dt=args.dt, adaptive=args.adaptive,
-                          rtol=args.rtol, atol=args.atol, names={'drift': 'f_aug', 'diffusion': 'g_aug'})
-
+        aug_ys = sdeint_fn(
+            sde=self,
+            y0=aug_y0,
+            ts=ts[:,0],
+            method=args.method,
+            dt=args.dt,
+            adaptive=args.adaptive,
+            rtol=args.rtol,
+            atol=args.atol,
+            names={'drift': 'f_aug', 'diffusion': 'g_aug'}
+        )
+        # aug_ys = sdeint_fn_batched(self, aug_y0, ts, sdeint_fn, method=args.method, dt=args.dt, adaptive=args.adaptive,
+        #                   rtol=args.rtol, atol=args.atol, names={'drift': 'f_aug', 'diffusion': 'g_aug'})
         ys, logqp_path = aug_ys[:, :, 0:self.h_size], aug_ys[-1, :, -1]
         logqp = (logqp0 + logqp_path).mean(dim=0)  # KL(t=0) + KL(path).
         return ys, logqp
@@ -224,7 +225,7 @@ class LatentSDE(torchsde.SDEIto):
         self.update_u(ts, us)
         eps = torch.randn(batch_size, self.h_size).to(self.py0_mean) if eps is None else eps
         y0 = self.py0_mean + eps * self.py0_std if y0 is None else y0
-        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method='srk', dt=args.dt, names={'drift': 'h'})
+        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method=args.method, dt=args.dt, names={'drift': 'h'})
         # return sdeint_fn_batched(self, y0, ts, sdeint_fn, method=args.method, dt=args.dt, names={'drift': 'h'})
 
     def sample_q(self, ts, us, ys, batch_size, y0=None, eps=None, bm=None):
@@ -232,7 +233,7 @@ class LatentSDE(torchsde.SDEIto):
         self.update_y(ts, ys)
         eps = torch.randn(batch_size, self.h_size).to(self.qy0_mean) if eps is None else eps
         y0 = self.qy0_mean + eps * self.qy0_std if y0 is None else y0
-        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method='srk', dt=args.dt)
+        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method=args.method, dt=args.dt)
         # return sdeint_fn_batched(self, y0, ts, sdeint_fn, method=args.method, dt=args.dt)
 
 
@@ -244,32 +245,6 @@ class LatentSDE(torchsde.SDEIto):
     @property
     def qy0_std(self):
         return torch.exp(.5 * self.qy0_logvar)
-
-
-def make_segmented_cosine_data():
-    ts_ = np.concatenate((np.linspace(0.3, 0.8, 10), np.linspace(1.2, 1.5, 10)), axis=0)
-    ts_ext_ = np.array([0.] + list(ts_) + [2.0])
-    ts_vis_ = np.linspace(0., 2.0, 300)
-    ys_ = np.cos(ts_ * (2. * math.pi))[:, None]
-
-    ts = torch.tensor(ts_).float()
-    ts_ext = torch.tensor(ts_ext_).float()
-    ts_vis = torch.tensor(ts_vis_).float()
-    ys = torch.tensor(ys_).float().to(device)
-    return Data(ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_)
-
-
-def make_irregular_sine_data():
-    ts_ = np.sort(np.random.uniform(low=0.4, high=1.6, size=16))
-    ts_ext_ = np.array([0.] + list(ts_) + [2.0])
-    ts_vis_ = np.linspace(0., 2.0, 300)
-    ys_ = np.sin(ts_ * (2. * math.pi))[:, None] * 0.8
-
-    ts = torch.tensor(ts_).float()
-    ts_ext = torch.tensor(ts_ext_).float()
-    ts_vis = torch.tensor(ts_vis_).float()
-    ys = torch.tensor(ys_).float().to(device)
-    return Data(ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_)
 
 def make_self_dataset(data_name, ct_time, sp, batch_size):
     train_all, test_all = select_dataset(data_name, ct_time, sp, batch_size=-1)
@@ -315,7 +290,7 @@ def main():
     if args.data == "cstr":
         args.u_size, args.y_size = 1, 2
     elif args.data == "winding":
-        args.u_size, args.y_size = 8, 2
+        args.u_size, args.y_size = 5, 2
     elif args.data == 'thickener':
         args.u_size, args.y_size = 8, 1
 
@@ -355,13 +330,15 @@ def main():
 
     for global_step in tqdm.tqdm(range(args.train_epochs)):
         # Plot and save.
-        if global_step % args.pause_iters == 0:
+        if global_step % args.pause_iters == 0 and args.eval:
             img_path = os.path.join(args.train_dir, f'global_step_{global_step}.png')
 
             with torch.no_grad():
                 # for i, (ts, ys) in enumerate(test_data_loader):
                 rmse_sum = 0
-                for i, (t1, t2, u1, u2, y1, y2) in enumerate(train_data_loader):
+                sum_bs = 0
+                for i, (t1, t2, u1, u2, y1, y2) in enumerate(test_data_loader):
+                    logger.info(f"eval {len(test_data_loader)}-{i}")
                     batch_size, length, _ = y1.shape
                     t1, t2, u1, u2, y1, y2 = [trans(x, device) for x in [t1, t2, u1, u2, y1, y2]]
 
@@ -369,10 +346,13 @@ def main():
                     zs = model.sample_p(t2, u2, batch_size=batch_size, y0=ys[-1])
                     pred_ys = model.h2y(zs)
 
-                    rmse_sum += RMSE_torch(y2, pred_ys) * batch_size
+                    rmse_sum += RMSE_torch(y2, pred_ys[...,:2]) * batch_size
                     sum_bs = sum_bs + batch_size
 
-            print(f"RMSE: {rmse_sum / sum_bs}")
+            # print(f"RMSE: {rmse_sum / sum_bs}")
+            logger.info(
+                f'\n RMSE: {rmse_sum / sum_bs}'
+            )
 
             if args.save_ckpt:
                 torch.save(
@@ -385,23 +365,27 @@ def main():
 
         # Train.
         optimizer.zero_grad()
-        for t1, t2, u1, u2, y1, y2 in train_data_loader:
-            batch_size, length, _ = y1.shape
-            t, u, y = torch.cat([t1, t2], dim=1), torch.cat([u1, u2], dim=1), torch.cat([y1, y2], dim=1)
-            t, u, y = t.to(device), u.to(device), y.to(device)
-            t, u, y = t.transpose(0, 1), u.transpose(0, 1), y.transpose(0, 1)
-            zs, kl = model(t=t, u=u, y=y, batch_size=batch_size)
-            # zs = zs.squeeze()
-            zs = zs[1:-1]  # Drop first and last which are only used to penalize out-of-data region and spread uncertainty.
+        for i, (t1, t2, u1, u2, y1, y2) in enumerate(train_data_loader):
+            tr = TimeRecorder()
 
-            likelihood_constructor = {"laplace": distributions.Laplace, "normal": distributions.Normal}[args.likelihood]
-            likelihood = likelihood_constructor(loc=zs, scale=args.scale)
-            logpy = likelihood.log_prob(ys).sum(dim=0).mean(dim=0)
+            with tr('data'):
+                batch_size, length, _ = y1.shape
+                t, u, y = torch.cat([t1, t2], dim=1), torch.cat([u1, u2], dim=1), torch.cat([y1, y2], dim=1)
+                t, u, y = t.to(device), u.to(device), y.to(device)
+                t, u, y = t.transpose(0, 1), u.transpose(0, 1), y.transpose(0, 1)
+            with tr('forward'):
+                zs, kl = model(t, u, y, batch_size=batch_size)
+                # likelihood_constructor = {"laplace": distributions.Laplace, "normal": distributions.Normal}[args.likelihood]
+                # likelihood = likelihood_constructor(loc=zs, scale=args.scale)
+                ys_mean, ys_logstd = torch.split(model.h2y(zs), model.y_size, dim=-1)
+                likelihood = distributions.Normal(loc=ys_mean, scale=torch.nn.functional.softplus(ys_logstd))
+                logpy = likelihood.log_prob(y).sum(dim=(0,2)).mean(dim=0)
+                loss = -logpy + kl * kl_scheduler.val
 
-            loss = -logpy + kl * kl_scheduler.val
-            loss.backward()
+            with tr('loss and train'):
+                loss.backward()
 
-            optimizer.step()
+                optimizer.step()
             scheduler.step()
             kl_scheduler.step()
 
@@ -409,11 +393,12 @@ def main():
             kl_metric.step(kl)
             loss_metric.step(loss)
 
-            logging.info(
-                f'global_step: {global_step}, '
+            logger.info(
+                f'\n epoch: {global_step}-{i}, '
                 f'logpy: {logpy_metric.val:.3f}, '
                 f'kl: {kl_metric.val:.3f}, '
-                f'loss: {loss_metric.val:.3f}'
+                f'loss: {loss_metric.val:.3f}, '
+                f'time: {tr.__str__()}'
             )
 
 if __name__ == '__main__':
@@ -425,8 +410,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--train-dir', type=str, required=True)
     parser.add_argument('--save-ckpt', type=str2bool, default=False, const=True, nargs="?")
+    parser.add_argument('--eval', type=str2bool, default=True, const=True, nargs="?")
 
     parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickening'])
+    parser.add_argument('--inter', type=str, default='gp', choices=['gp', 'cubic'])
     parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
     parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
@@ -434,7 +421,7 @@ if __name__ == '__main__':
     parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
     parser.add_argument('--h_size', type=int, default=16, help='Size of hidden state in SDE.')
     parser.add_argument('--train-epochs', type=int, default=500, help='Number of epochs for training.')
-    parser.add_argument('--pause-iters', type=int, default=50, help='Number of iterations before pausing.')
+    parser.add_argument('--pause-iters', type=int, default=5, help='Number of iterations before pausing.')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
     parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='normal')
     parser.add_argument('--scale', type=float, default=0.05, help='Scale parameter of Normal and Laplace.')
@@ -455,17 +442,34 @@ if __name__ == '__main__':
     parser.add_argument('--hide-ticks', type=str2bool, default=False, const=True, nargs="?")
     parser.add_argument('--dpi', type=int, default=300)
     parser.add_argument('--color', type=str, default='blue', choices=('blue', 'red'))
+
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_gpu else 'cpu')
     manual_seed(args.seed)
 
-    if args.debug:
-        logging.getLogger().setLevel(logging.INFO)
+    # if args.debug:
+
+    logger = logging.getLogger(__file__)
+    logger.setLevel(logging.DEBUG)
+
+    test_log = logging.FileHandler(f'logs/{args.data}.log', 'w', encoding='utf-8')
+    test_log.setLevel(logging.DEBUG)
+
+    stdout_log = logging.StreamHandler()
+    stdout_log.setLevel(logging.DEBUG)
+
+    formator = logging.Formatter(fmt="%(asctime)s %(filename)s %(levelname)s %(message)s",
+                                 datefmt="%Y/%m/%d %X")
+    stdout_log.setFormatter(formator)
+    test_log.setFormatter(formator)
+
+    logger.addHandler(stdout_log)
+    logger.addHandler(test_log)
 
     ckpt_dir = os.path.join(args.train_dir, 'ckpts')
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    sdeint_fn = torchsde.sdeint
+    sdeint_fn = torchsde.sdeint_adjoint if args.adjoint else torchsde.sdeint
 
     main()

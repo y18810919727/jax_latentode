@@ -61,6 +61,8 @@ def K(X1, X2, ell=1.0, sf=1.0, eps=1e-5):
 
 class KernelInterpolation:
     def __init__(self, X, y, eps=1e-5, kernel='exp'):
+        if X.ndim == 2:
+            X = X.unsqueeze(dim=-1)
         X = X.transpose(0, 1)
         y = y.transpose(0, 1)
         N, T, _ = y.shape

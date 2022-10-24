@@ -149,12 +149,13 @@ def sdeint_fn_batched(model, y0, ts, sdeint_fn, method='euler', dt=1e-2, adaptiv
     return torch.stack(ys, dim=0)
 
 
-class Intepolation:
-    def __init__(self, x, ts):
+class Interpolation:
+    def __init__(self, ts, x):
+        ts = ts[:, 0]
         x = x.transpose(0, 1)
-        ts = ts.transpose(0, 1)
-        x = torch.cat([ts, x], dim=-1)
-        coeffs = torchcde.hermite_cubic_coefficients_with_backward_differences(x)
+        # ts = ts.transpose(0, 1)
+        # x = torch.cat([ts, x], dim=-1)
+        coeffs = torchcde.hermite_cubic_coefficients_with_backward_differences(x, ts)
         self.X = torchcde.CubicSpline(coeffs)
 
     def __call__(self, t):
@@ -189,6 +190,28 @@ def RMSE_jnp(y_gt, y_pred):
     else:
         raise AttributeError
 
+class TimeRecorder:
+    def __init__(self):
+        self.infos = {}
+
+    def __call__(self, info, *args, **kwargs):
+        class Context:
+            def __init__(self, recoder, info):
+                self.recoder = recoder
+                self.begin_time = None
+                self.info = info
+
+            def __enter__(self):
+                self.begin_time = time.time()
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self.recoder.infos[self.info] = time.time() - self.begin_time
+
+        return Context(self, info)
+
+    def __str__(self):
+        return ' '.join(['{}:{:.2f}s'.format(info, t) for info, t in self.infos.items()])
+
 if __name__ == '__main__':
     # a = np.random.randn(3, 3)
     # b = np.random.randn(3, 3)
@@ -200,11 +223,15 @@ if __name__ == '__main__':
     #
     # print(RMSE_jnp(y_gt, y_pred))
     # print(RMSE_torch(y_gt_t, y_pred_t))
-    X = torch.randn((3, 3, 3))
-    t = torch.linspace(0,1,3).reshape((3,1,1)).repeat((1,3,1))
-    print(X.shape, t.shape)
-    inter = Intepolation(X, t)
-    pos = torch.mean(t, dim=1)
-    print(inter(pos).shape)
+    # X = torch.randn((3, 3, 3))
+    # t = torch.linspace(0,1,3).reshape((3,1,1)).repeat((1,3,1))
+    # print(X.shape, t.shape)
+    # inter = Intepolation(X, t)
+    # pos = torch.mean(t, dim=1)
+    # print(inter(pos).shape)
+    x = torch.rand((30, 16, 3))
+    T = torch.linspace(0, 1, 30)
+    inter = Interpolation(x, T)
+    print(inter(0.5).shape)
 
 

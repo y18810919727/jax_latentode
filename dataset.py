@@ -82,9 +82,14 @@ def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
         train_path = 'data/cstr/cstr_train.csv'
         val_path = 'data/cstr/cstr_val.csv'
         test_path = 'data/cstr/cstr_test.csv'
+        # todo
+        # history_length = 30
+        # forward_length = 90
+        # dataset_window = 2
         history_length = 60
         forward_length = 180
         dataset_window = 2
+
         input_dim = 1
         output_dim = 2
 
@@ -505,14 +510,9 @@ class CTSample:
 
         # ts_history = ts[:, :history_length, :]
         # ts_forward = ts[:, forward_length:, :]
-        external_input_history, observation_history = data_rasample(
-            external_input[:, :self.history_length, :], observation[:, :self.history_length, :]
-        )
-
-        external_input_forward, observation_forward = data_rasample(
-            external_input[:, self.history_length:, :], observation[:, self.history_length:, :]
-        )
-        # observation = add_tp(observation, dt)
-        # return external_input, observation, external_input_origin, observation_origin
+        history_length = int(self.history_length * self.sp)
+        external_input_sub, observation_sub = data_rasample(external_input, observation)
+        external_input_history, external_input_forward = external_input_sub[:, :history_length, :], external_input_sub[:, history_length:, :]
+        observation_history, observation_forward = observation_sub[:, :history_length, :], observation_sub[:, history_length:, :]
         return external_input_history, external_input_forward, observation_history, observation_forward
 
