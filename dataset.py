@@ -135,23 +135,11 @@ def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
 
         external_input_history, ts_history = external_input_history.split([input_dim, 1], dim=-1)
         external_input_forward, ts_forward = external_input_forward.split([input_dim, 1], dim=-1)
-        # external_input_history = torch.cat([external_input_history, tp_history], dim=-1)
-        # external_input_forward = torch.cat([external_input_forward, tp_forward], dim=-1)
         all_dt = torch.cat([ts_history, ts_forward], dim=1).squeeze(dim=-1)
         all_t = torch.cumsum(torch.cat([torch.zeros_like(all_dt[:, :1]), all_dt[:, :-1]], dim=1), dim=1)
         history_length = external_input_history.shape[1]
         ts_history = all_t[:, :history_length]
         ts_forward = all_t[:, history_length:]
-        # ts_history = torch.clip(ts_history, 1e-6, 1e6)
-        # ts_forward = torch.clip(ts_forward, 1e-6, 1e6)
-        # ts_history = torch.cumsum(ts_history, dim=1).squeeze(dim=-1)
-        # ts_forward = torch.cumsum(ts_forward, dim=1).squeeze(dim=-1)
-        # ts_history = jnp.array(ts_history.squeeze(dim=-1).numpy().tolist())
-        # ts_forward = jnp.array(ts_forward.squeeze(dim=-1).numpy().tolist())
-        # external_input_history = jnp.array(external_input_history.numpy().tolist())
-        # external_input_forward = jnp.array(external_input_forward.numpy().tolist())
-        # observation_history = jnp.array(observation_history.numpy().tolist())
-        # observation_forward = jnp.array(observation_forward.numpy().tolist())
 
         return [ts_history, ts_forward, external_input_history, external_input_forward,
                             observation_history, observation_forward]
