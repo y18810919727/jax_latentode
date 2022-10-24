@@ -69,10 +69,12 @@ def dataloader(arrays, batch_size, *, key):
         end = batch_size
         while start < dataset_size:
             batch_perm = perm[start:end]
-            # TODO: 在这里再变为jnp
-            yield tuple(array[batch_perm] for array in arrays)
+            batch_perm = batch_perm.tolist()
+            # yield tuple(array[batch_perm] for array in arrays)
+            yield tuple(jnp.array(array[batch_perm]) for array in arrays)
             start = end
             end = start + batch_size
+        yield tuple(None for _ in arrays)
 
 
 def select_dataset(dataset_name, ct_time, sp):
@@ -82,7 +84,7 @@ def select_dataset(dataset_name, ct_time, sp):
         test_path = 'data/cstr/cstr_test.csv'
         history_length = 60
         forward_length = 180
-        dataset_window = 2
+        dataset_window = 5
         input_dim = 1
         output_dim = 2
 
@@ -134,23 +136,27 @@ def select_dataset(dataset_name, ct_time, sp):
         raise NotImplementedError
 
     def get_jnp_list(data_loader):
-        for i, data in enumerate(data_loader):
-            external_input_history, external_input_forward, observation_history, observation_forward = data
+        external_input_history, external_input_forward, observation_history, observation_forward = iter(data_loader).next()
+
         external_input_history, ts_history = external_input_history.split([input_dim, 1], dim=-1)
         external_input_forward, ts_forward = external_input_forward.split([input_dim, 1], dim=-1)
         # external_input_history = torch.cat([external_input_history, tp_history], dim=-1)
         # external_input_forward = torch.cat([external_input_forward, tp_forward], dim=-1)
-
-        ts_history = torch.clip(ts_history, 1e-6, 1e6)
-        ts_forward = torch.clip(ts_forward, 1e-6, 1e6)
-        ts_history = torch.cumsum(ts_history, dim=1)
-        ts_forward = torch.cumsum(ts_forward, dim=1)
-        ts_history = jnp.array(ts_history.squeeze(dim=-1).numpy().tolist())
-        ts_forward = jnp.array(ts_forward.squeeze(dim=-1).numpy().tolist())
-        external_input_history = jnp.array(external_input_history.numpy().tolist())
-        external_input_forward = jnp.array(external_input_forward.numpy().tolist())
-        observation_history = jnp.array(observation_history.numpy().tolist())
-        observation_forward = jnp.array(observation_forward.numpy().tolist())
+        all_dt = torch.cat([ts_history, ts_forward], dim=1).squeeze(dim=-1)
+        all_t = torch.cumsum(torch.cat([torch.zeros_like(all_dt[:, :1]), all_dt[:, :-1]], dim=1), dim=1)
+        history_length = external_input_history.shape[1]
+        ts_history = all_t[:, :history_length]
+        ts_forward = all_t[:, history_length:]
+        # ts_history = torch.clip(ts_history, 1e-6, 1e6)
+        # ts_forward = torch.clip(ts_forward, 1e-6, 1e6)
+        # ts_history = torch.cumsum(ts_history, dim=1).squeeze(dim=-1)
+        # ts_forward = torch.cumsum(ts_forward, dim=1).squeeze(dim=-1)
+        # ts_history = jnp.array(ts_history.squeeze(dim=-1).numpy().tolist())
+        # ts_forward = jnp.array(ts_forward.squeeze(dim=-1).numpy().tolist())
+        # external_input_history = jnp.array(external_input_history.numpy().tolist())
+        # external_input_forward = jnp.array(external_input_forward.numpy().tolist())
+        # observation_history = jnp.array(observation_history.numpy().tolist())
+        # observation_forward = jnp.array(observation_forward.numpy().tolist())
 
         return [ts_history, ts_forward, external_input_history, external_input_forward,
                             observation_history, observation_forward]
@@ -160,10 +166,10 @@ def select_dataset(dataset_name, ct_time, sp):
     test_loader = DataLoader(test_dataset, batch_size=100000,
                              shuffle=True, num_workers=8, collate_fn=collate_fn)
 
-    jnp_train = get_jnp_list(train_loader)
-    jnp_test = get_jnp_list(test_loader)
+    train_all = get_jnp_list(train_loader)
+    test_all = get_jnp_list(test_loader)
 
-    return jnp_train, jnp_test
+    return train_all, test_all
 
 
 class CstrDataset(Dataset):

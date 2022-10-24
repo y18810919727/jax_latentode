@@ -20,45 +20,45 @@ def main(
     lr=1e-2,
     steps=250,
     test_steps=1000,
-    save_every=50,
+    save_every=10,
     hidden_size=16,
     latent_size=16,
     width_size=16,
     depth=2,
     seed=5678,
+    epoch_num=30
 ):
     key = jrandom.PRNGKey(seed)
     data_key, model_key, loader_key, train_key, sample_key = jrandom.split(key, 5)
 
-    jnp_train, jnp_test = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
+    train_all, test_all = select_dataset(dataset_name='cstr', ct_time=True, sp=0.5)
 
-    ts_history, ts_forward, external_input_history, external_input_forward, \
-    observation_history, observation_forward = jnp_train
+    ts_train, us_train, ys_train = [torch.cat([train_all[i], train_all[i+1]], dim=1) for i in range(0, 6, 2)]
 
     ts_history_test, ts_forward_test, external_input_history_test, external_input_forward_test, \
-    observation_history_test, observation_forward_test = jnp_test
-    # 拼接全length的jnp array
-    ts = torch.cat([torch.tensor(ts_history.tolist()),
-                    torch.tensor(ts_forward.tolist())], dim=1)
-    ts = jnp.array(ts.numpy().tolist())
-    us = torch.cat([torch.tensor(external_input_history.tolist()),
-                    torch.tensor(external_input_forward.tolist())], dim=1)
-    us = jnp.array(us.numpy().tolist())
-    ys = torch.cat([torch.tensor(observation_history.tolist()),
-                    torch.tensor(observation_forward.tolist())], dim=1)
-    ys = jnp.array(ys.numpy().tolist())
+    observation_history_test, observation_forward_test = test_all
+    # # 拼接全length的jnp array
+    # ts = torch.cat([torch.tensor(ts_history.tolist()),
+    #                 torch.tensor(ts_forward.tolist())], dim=1)
+    # ts = jnp.array(ts.numpy().tolist())
+    # us = torch.cat([torch.tensor(external_input_history.tolist()),
+    #                 torch.tensor(external_input_forward.tolist())], dim=1)
+    # us = jnp.array(us.numpy().tolist())
+    # ys = torch.cat([torch.tensor(observation_history.tolist()),
+    #                 torch.tensor(observation_forward.tolist())], dim=1)
+    # ys = jnp.array(ys.numpy().tolist())
 
     # ts, ys, us = get_data(dataset_size, key=data_key)
 
 
     model = LatentODE(
-        data_size=ys.shape[-1] + us.shape[-1],
+        out_size = ys_train.shape[-1],
         hidden_size=hidden_size,
         latent_size=latent_size,
         width_size=width_size,
         depth=depth,
         key=model_key,
-        us_num=us.shape[-1],
+        us_num=us_train.shape[-1],
     )
 
     @eqx.filter_value_and_grad
@@ -76,6 +76,16 @@ def main(
         model = eqx.apply_updates(model, updates)
         return value, model, opt_state, key_i
 
+    @eqx.filter_jit
+    def model_eval(model, ts_history_test_i, observation_history_test_i, external_input_history_test_i, ts_forward_test_i,
+             observation_forward_test_i, external_input_forward_test_i, key_i):
+        batch_size, _ = ts_history_test_i.shape
+        key_i = jrandom.split(key_i, batch_size)
+        pred_y = jax.vmap(model.sample)(ts_history_test_i, observation_history_test_i, external_input_history_test_i,
+                 ts_forward_test_i, external_input_forward_test_i, key=key_i)
+        rmse_sum = jnp.sum(jnp.sqrt(jnp.mean((pred_y - observation_forward_test_i) ** 2, axis=1)))
+        return pred_y, rmse_sum, batch_size
+
     optim = optax.adam(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
@@ -86,45 +96,41 @@ def main(
     fig, axs = plt.subplots(1, num_plots, figsize=(num_plots * 8, 8))
     axs[0].set_ylabel("x")
     axs = iter(axs)
-    for step, (ts_i, ys_i, us_i) in zip(
-            range(steps), dataloader((ts, ys, us), batch_size, key=loader_key)
-    ):
-        start = time.time()
-        value, model, opt_state, train_key = make_step(
-            model, opt_state, ts_i, ys_i, us_i, train_key
-        )
-        end = time.time()
-        print(f"Step: {step}, Loss: {value}, Computation time: {end - start}")
+    iter_train_dataloader = dataloader((ts_train, ys_train, us_train), batch_size, key=loader_key)
+    iter_test_dataloader = dataloader((ts_history_test, ts_forward_test, external_input_history_test,
+                                                   external_input_forward_test, observation_history_test,
+                                                   observation_forward_test), batch_size, key=loader_key)
+    for epoch in range(epoch_num):
+        for step, (ts_i, ys_i, us_i) in enumerate(iter_train_dataloader):
+            if ts_i is None:
+                break
+            start = time.time()
+            value, model, opt_state, train_key = make_step(
+                model, opt_state, ts_i, ys_i, us_i, train_key
+            )
+            end = time.time()
+            print(f"Step: {step}, Loss: {value}, Computation time: {end - start}")
 
-        if (step % save_every) == 0 or step == steps - 1:
+        if (epoch % save_every) == 0 or epoch == epoch_num - 1:
             # ax = next(axs)
             # Sample over a longer time interval than we trained on. The model will be
             # sufficiently good that it will correctly extrapolate!
 
-            acc_rmse = []
-            for test_step, (ts_history_test_i, ts_forward_test_i, external_input_history_test_i,
+            sum_rmse = 0
+            sum_bs = 0
+            for (ts_history_test_i, ts_forward_test_i, external_input_history_test_i,
                             external_input_forward_test_i, observation_history_test_i,
-                            observation_forward_test_i) in zip(
-                    range(test_steps), dataloader((ts_history_test, ts_forward_test, external_input_history_test,
-                                                   external_input_forward_test, observation_history_test,
-                                                   observation_forward_test), batch_size, key=loader_key)
-            ):
+                            observation_forward_test_i) in iter_test_dataloader:
+                if ts_history_test_i is None:
+                    break
+                pred_y, rmse, batch_size = model_eval(model, ts_history_test_i, observation_history_test_i, external_input_history_test_i,
+                           ts_forward_test_i, observation_forward_test_i, external_input_forward_test_i, sample_key)
+                # acc_rmse.append(np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y)))
+                sum_rmse = sum_rmse + rmse
+                sum_bs = sum_bs + batch_size
 
-                test_data = SampleDataWrapper(ts_history_test_i, ts_forward_test_i, external_input_history_test_i,
-                            external_input_forward_test_i, observation_history_test_i,
-                            observation_forward_test_i)
-
-                sample_y = model.sample(test_data, key=sample_key)
-                sample_t = np.asarray(test_data.predict_t)
-                sample_y = np.asarray(sample_y)
-                acc_rmse.append(np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y)))
             # print(f"RMSE: {np.sqrt(mean_squared_error(sample_y[:, [0, 1]], test_data.predict_y))}")
-            print(f"RMSE: {mean(acc_rmse)}")
-            # ax.plot(sample_t, sample_y[:, 0])
-            # ax.plot(sample_t, sample_y[:, 1])
-            # ax.set_xticks([])
-            # ax.set_yticks([])
-            # ax.set_xlabel("t")
+            print(f"RMSE: {sum_rmse/sum_bs}")
 
     # plt.savefig("latent_ode.png")
     # plt.show()

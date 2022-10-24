@@ -17,7 +17,7 @@ class LatentODE(eqx.Module):
     latent_size: int
 
     def __init__(
-            self, *, data_size, hidden_size, latent_size, width_size, depth, key, us_num, **kwargs
+            self, *, out_size, hidden_size, latent_size, width_size, depth, key, us_num, **kwargs
     ):
         super().__init__(**kwargs)
 
@@ -34,13 +34,13 @@ class LatentODE(eqx.Module):
             key=mkey,
         )
         self.func = Func(scale, mlp)
-        self.rnn_cell = eqx.nn.GRUCell(data_size + 1, hidden_size, key=gkey)
+        self.rnn_cell = eqx.nn.GRUCell(out_size + us_num + 1, hidden_size, key=gkey)
 
         self.hidden_to_latent = eqx.nn.Linear(hidden_size, 2 * latent_size, key=hlkey)
         self.latent_to_hidden = eqx.nn.MLP(
             latent_size, hidden_size, width_size=width_size, depth=depth, key=lhkey
         )
-        self.hidden_to_data = eqx.nn.Linear(hidden_size, data_size, key=hdkey)
+        self.hidden_to_data = eqx.nn.Linear(hidden_size, out_size, key=hdkey)
 
         self.hidden_size = hidden_size
         self.latent_size = latent_size
@@ -90,6 +90,9 @@ class LatentODE(eqx.Module):
         return self._loss(ys, pred_ys, mean, std)
 
     # Run just the decoder during inference.
-    def sample(self, sdata: SampleDataWrapper, *, key):
-        latent, mean, std = self._latent(sdata.observe_t, sdata.observe_y, sdata.observe_u, key)
-        return self._sample(sdata.predict_t, sdata.predict_u, latent)
+    def sample(self, ts_history_test_i, observation_history_test_i, external_input_history_test_i, ts_forward_test_i,
+             external_input_forward_test_i, *, key):
+        # ts_history_test_i, observation_history_test_i, external_input_history_test_i, ts_forward_test_i,
+        # observation_forward_test_i, external_input_forward_test_i
+        latent, mean, std = self._latent(ts_history_test_i, observation_history_test_i, external_input_history_test_i, key)
+        return self._sample(ts_forward_test_i, external_input_forward_test_i, latent)
