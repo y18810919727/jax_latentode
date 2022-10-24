@@ -11,7 +11,11 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import matplotlib
 import matplotlib.pyplot as plt
+import torchcde
+import torchsde
+
 import numpy as np
+import torch
 import optax
 from datetime import datetime, timezone, timedelta
 
@@ -64,3 +68,119 @@ def rrse_metric(truth, prediction):
         return 100 * rrse  # in percentage
     results = [rrse_metric(truth[:, i], prediction[:, i]) for i in range(truth.shape[-1])]
     return np.mean(results)
+
+
+def sdeint_fn_batched(model, y0, ts, sdeint_fn, method='euler', dt=1e-2, adaptive=True, rtol=1e-6, atol=1e-6,  names=None):
+
+    if names is None:
+        names = {'drift': 'f', 'diffusion': 'g'}
+
+    if ts.dim() == 1:
+        aug_ys = sdeint_fn(
+            sde=model,
+            y0=y0,
+            ts=ts,
+            method=method,
+            dt=dt,
+            adaptive=adaptive,
+            rtol=rtol,
+            atol=atol,
+            names=names
+        )
+        return aug_ys
+
+    batch_size, h_dim = y0.shape
+    class BatchedSDE:
+        def __init__(self, model, names, dT):
+            self.model = model
+            self.ori_drift = getattr(model, names['drift'])
+            self.ori_diffusion = getattr(model, names['diffusion'])
+            self.dT = dT
+            setattr(self, names['drift'], self.f_reparameterization)
+            setattr(self, names['diffusion'], self.g_reparameterization)
+
+        def f_reparameterization(self, t, y):
+            return self.ori_drift(t, y) * self.dT
+
+        def g_reparameterization(self, t, y):
+            return self.ori_diffusion(t, y) * self.dT
+
+    dT = ts[1:] - ts[:-1]
+    ys = [y0]
+    for dt in dT:
+        batched_sde = BatchedSDE(model, names, dt)
+
+        bm = torchsde.BrownianInterval(
+            t0=0,
+            t1=1,
+            size=(batch_size, h_dim),
+            device=y0.device,
+            levy_area_approximation='space-time'
+        )  # We need space-time Levy area to use the SRK solver
+        aug_ys = sdeint_fn(
+            sde=batched_sde,
+            y0=y0,
+            ts=torch.Tensor([0.0, 1.0]).to(y0.device),
+            bm=bm,
+            method=method,
+            dt=dt,
+            adaptive=adaptive,
+            rtol=rtol,
+            atol=atol,
+            names=names
+        )
+        ys.append(aug_ys[-1])
+    return torch.stack(ys, dim=0)
+
+
+class Intepolation:
+    def __init__(self, x, ts):
+        x = x.transpose(0, 1)
+        ts = ts.transpose(0, 1)
+        x = torch.cat([ts, x], dim=-1)
+        coeffs = torchcde.hermite_cubic_coefficients_with_backward_differences(x)
+        self.X = torchcde.CubicSpline(coeffs)
+
+    def __call__(self, t):
+        return self.X(t)
+
+
+def RMSE_torch(y_gt, y_pred):
+    if len(y_gt.shape) == 3:
+        return torch.mean(
+            torch.stack(
+                [RMSE_torch(y_gt[:, i], y_pred[:, i]) for i in range(y_gt.shape[1])]
+            )
+        )
+    elif len(y_gt.shape) == 2:
+        se = torch.sum((y_gt - y_pred) ** 2, dim=0)
+        rse = torch.sqrt(se / y_gt.shape[0])
+        return torch.mean(rse)
+    else:
+        raise AttributeError
+
+def RMSE_jnp(y_gt, y_pred):
+    if len(y_gt.shape) == 3:
+        return jnp.mean(
+            jnp.stack(
+                [RMSE_jnp(y_gt[:, i], y_pred[:, i]) for i in range(y_gt.shape[1])]
+            )
+        )
+    elif len(y_gt.shape) == 2:
+        se = jnp.sum((y_gt - y_pred) ** 2, axis=0)
+        rse = jnp.sqrt(se / y_gt.shape[0])
+        return jnp.mean(rse)
+    else:
+        raise AttributeError
+
+if __name__ == '__main__':
+    a = np.random.randn(3, 3)
+    b = np.random.randn(3, 3)
+    y_gt = jnp.array(a)
+    y_pred = jnp.array(b)
+
+    y_gt_t = torch.from_numpy(a)
+    y_pred_t = torch.from_numpy(b)
+
+    print(RMSE_jnp(y_gt, y_pred))
+    print(RMSE_torch(y_gt_t, y_pred_t))

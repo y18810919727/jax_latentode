@@ -77,7 +77,7 @@ def dataloader(arrays, batch_size, *, key):
         yield tuple(None for _ in arrays)
 
 
-def select_dataset(dataset_name, ct_time, sp):
+def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
     if dataset_name == 'cstr':
         train_path = 'data/cstr/cstr_train.csv'
         val_path = 'data/cstr/cstr_val.csv'
@@ -91,8 +91,6 @@ def select_dataset(dataset_name, ct_time, sp):
         train_dataset = CstrDataset(pd.read_csv(train_path), history_length + forward_length, step=dataset_window)
         # val_dataset = CstrDataset(pd.read_csv(val_path), history_length + forward_length, step=dataset_window)
         test_dataset = CstrDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
-        collate_fn = None if not ct_time else \
-            CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
 
     elif dataset_name == 'winding':
         train_path = 'data/winding/winding_train.csv'
@@ -107,8 +105,6 @@ def select_dataset(dataset_name, ct_time, sp):
         train_dataset = WindingDataset(pd.read_csv(train_path), history_length + forward_length, step=dataset_window)
         # val_dataset = WindingDataset(pd.read_csv(val_path), history_length + forward_length, step=dataset_window)
         test_dataset = WindingDataset(pd.read_csv(test_path), history_length + forward_length, step=dataset_window)
-        collate_fn = None if not ct_time else \
-            CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
 
     elif dataset_name == 'thickener':
         data_dir = 'data/west'
@@ -128,12 +124,11 @@ def select_dataset(dataset_name, ct_time, sp):
         #                                step=dataset_window, dilation=dilation)
         test_dataset = WesternDataset(data_csvs[-test_size:], history_length + forward_length,
                                     step=dataset_window, dilation=dilation)
-
-        collate_fn = None if not ct_time else \
-            CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
-
     else:
         raise NotImplementedError
+
+    collate_fn = None if not ct_time else \
+        CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
 
     def get_jnp_list(data_loader):
         external_input_history, external_input_forward, observation_history, observation_forward = iter(data_loader).next()
@@ -161,9 +156,9 @@ def select_dataset(dataset_name, ct_time, sp):
         return [ts_history, ts_forward, external_input_history, external_input_forward,
                             observation_history, observation_forward]
 
-    train_loader = DataLoader(train_dataset, batch_size=100000,
+    train_loader = DataLoader(train_dataset, batch_size=100000 if batch_size == -1 else batch_size,
                               shuffle=True, num_workers=8, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=100000,
+    test_loader = DataLoader(test_dataset, batch_size= 100000 if batch_size == -1 else batch_size,
                              shuffle=True, num_workers=8, collate_fn=collate_fn)
 
     train_all = get_jnp_list(train_loader)

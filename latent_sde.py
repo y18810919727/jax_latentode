@@ -17,6 +17,9 @@
 
 """Latent SDE fit to a single time series with uncertainty quantification."""
 import argparse
+from common import Intepolation
+from dataset import select_dataset
+
 import logging
 import math
 import os
@@ -65,6 +68,8 @@ class EMAMetric(object):
     def val(self):
         return self._val
 
+def trans(x, device):
+    return x.to(device).transpose(0, 1)
 
 def str2bool(v):
     """Used for boolean arguments in argparse; avoiding `store_true` and `store_false`."""
@@ -141,11 +146,17 @@ class LatentSDE(torchsde.SDEIto):
         self.qy0_mean = nn.Parameter(torch.zeros(h_size), requires_grad=True)
         self.qy0_logvar = nn.Parameter(torch.zeros(h_size), requires_grad=True)
 
+        self.h2y = nn.Sequential(
+            nn.Linear(h_size, 2*h_size),
+            nn.Tanh(),
+            nn.Linear(y_size)
+        )
+
     def update_u(self, ts, u):
-        self.u_inter = u
+        self.u_inter = Intepolation(u, ts)
 
     def update_y(self, ts, y):
-        self.y_inter = y
+        self.y_inter = Intepolation(y, ts)
 
     def f(self, t, h):  # Approximate posterior drift.
         # if t.dim() == 0:
@@ -248,6 +259,23 @@ def make_irregular_sine_data():
     ys = torch.tensor(ys_).float().to(device)
     return Data(ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_)
 
+def make_self_dataset(data_name, ct_time, sp, batch_size):
+    train_all, test_all = select_dataset(data_name, ct_time, sp, batch_size=-1)
+    class Dataset(torch.utils.data.Dataset):
+        def __init__(self, arrays):
+            self.arrays = arrays
+
+        def __getitem__(self, index):
+            return tuple(data[index] for data in self.arrays)
+        def __len__(self):
+            return self.arrays[0].shape[0]
+
+    train_data_loader = torch.utils.data.DataLoader(Dataset(train_all), batch_size=batch_size, shuffle=True, num_workers=8)
+    test_data_loader = torch.utils.data.DataLoader(Dataset(test_all), batch_size=batch_size, shuffle=True, num_workers=8)
+
+    return train_data_loader, test_data_loader
+
+
 
 def make_data():
     data_constructor = {
@@ -260,6 +288,8 @@ def make_data():
 def main():
     # Dataset.
     ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_ = make_data()
+
+    train_data_loader, test_data_loader = make_self_dataset(args.data, args.ct_time, args.sp, args.batch_size)
 
     # Plotting parameters.
     vis_batch_size = 1024
@@ -280,13 +310,6 @@ def main():
         num_samples = len(sample_colors)
 
     eps = torch.randn(vis_batch_size, 1).to(device)  # Fix seed for the random draws used in the plots.
-    bm = torchsde.BrownianInterval(
-        t0=ts_vis[0],
-        t1=ts_vis[-1],
-        size=(vis_batch_size, 1),
-        device=device,
-        levy_area_approximation='space-time'
-    )  # We need space-time Levy area to use the SRK solver
 
     # Model.
     model = LatentSDE(args.h_size, args.y_size, args.u_size).to(device)
@@ -298,115 +321,130 @@ def main():
     kl_metric = EMAMetric()
     loss_metric = EMAMetric()
 
-    if args.show_prior:
-        with torch.no_grad():
-            zs = model.sample_p(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
-            ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
-            zs_ = np.sort(zs_, axis=1)
+    # if args.show_prior:
+    #     with torch.no_grad():
+    #         zs = model.sample_p(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
+    #         ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
+    #         zs_ = np.sort(zs_, axis=1)
+    #
+    #         img_dir = os.path.join(args.train_dir, 'prior.png')
+    #         plt.subplot(frameon=False)
+    #         for alpha, percentile in zip(alphas, percentiles):
+    #             idx = int((1 - percentile) / 2. * vis_batch_size)
+    #             zs_bot_ = zs_[:, idx]
+    #             zs_top_ = zs_[:, -idx]
+    #             plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
+    #
+    #         # `zorder` determines who's on top; the larger the more at the top.
+    #         plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
+    #         plt.ylim(ylims)
+    #         plt.xlabel('$t$')
+    #         plt.ylabel('$Y_t$')
+    #         plt.tight_layout()
+    #         plt.savefig(img_dir, dpi=args.dpi)
+    #         plt.close()
+    #         logging.info(f'Saved prior figure at: {img_dir}')
 
-            img_dir = os.path.join(args.train_dir, 'prior.png')
-            plt.subplot(frameon=False)
-            for alpha, percentile in zip(alphas, percentiles):
-                idx = int((1 - percentile) / 2. * vis_batch_size)
-                zs_bot_ = zs_[:, idx]
-                zs_top_ = zs_[:, -idx]
-                plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
-
-            # `zorder` determines who's on top; the larger the more at the top.
-            plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
-            plt.ylim(ylims)
-            plt.xlabel('$t$')
-            plt.ylabel('$Y_t$')
-            plt.tight_layout()
-            plt.savefig(img_dir, dpi=args.dpi)
-            plt.close()
-            logging.info(f'Saved prior figure at: {img_dir}')
-
-    for global_step in tqdm.tqdm(range(args.train_iters)):
+    for global_step in tqdm.tqdm(range(args.train_epochs)):
         # Plot and save.
         if global_step % args.pause_iters == 0:
             img_path = os.path.join(args.train_dir, f'global_step_{global_step}.png')
 
             with torch.no_grad():
-                zs = model.sample_q(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
-                samples = zs[:, vis_idx]
-                ts_vis_, zs_, samples_ = ts_vis.cpu().numpy(), zs.cpu().numpy(), samples.cpu().numpy()
-                zs_ = np.sort(zs_, axis=1)
-                plt.subplot(frameon=False)
+                # for i, (ts, ys) in enumerate(test_data_loader):
+                for i, (t1, t2, u1, u2, y1, y2) in enumerate(train_data_loader):
+                    batch_size, length, _ = y1.shape
+                    t1, t2, u1, u2, y1, y2 = [trans(x, device) for x in [t1, t2, u1, u2, y1, y2]]
 
-                if args.show_percentiles:
-                    for alpha, percentile in zip(alphas, percentiles):
-                        idx = int((1 - percentile) / 2. * vis_batch_size)
-                        zs_bot_, zs_top_ = zs_[:, idx], zs_[:, -idx]
-                        plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
+                    ys = model.sample_q(t1, u1, y1, batch_size)
+                    zs = model.sample_p(t2, u2, batch_size=batch_size, y0=ys[-1])
+                    pred_ys = model.h2y(zs)
 
-                if args.show_mean:
-                    plt.plot(ts_vis_, zs_.mean(axis=1), color=mean_color)
+                    rmse_sum = torch.sum(torch.sqrt(torch.mean((pred_ys - y2) ** 2, dim=0)))
 
-                if args.show_samples:
-                    for j in range(num_samples):
-                        plt.plot(ts_vis_, samples_[:, j], color=sample_colors[j], linewidth=1.0)
+                    # samples = zs[:, vis_idx]
+                    # ts_vis_, zs_, samples_ = ts_vis.cpu().numpy(), zs.cpu().numpy(), samples.cpu().numpy()
+                    # zs_ = np.sort(zs_, axis=1)
+                    # plt.subplot(frameon=False)
+                    #
+                    # if args.show_percentiles:
+                    #     for alpha, percentile in zip(alphas, percentiles):
+                    #         idx = int((1 - percentile) / 2. * vis_batch_size)
+                    #         zs_bot_, zs_top_ = zs_[:, idx], zs_[:, -idx]
+                    #         plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
+                    #
+                    # if args.show_mean:
+                    #     plt.plot(ts_vis_, zs_.mean(axis=1), color=mean_color)
+                    #
+                    # if args.show_samples:
+                    #     for j in range(num_samples):
+                    #         plt.plot(ts_vis_, samples_[:, j], color=sample_colors[j], linewidth=1.0)
+                    #
+                    # if args.show_arrows:
+                    #     num, dt = 12, 0.12
+                    #     t, y = torch.meshgrid(
+                    #         [torch.linspace(0.2, 1.8, num).to(device), torch.linspace(-1.5, 1.5, num).to(device)]
+                    #     )
+                    #     t, y = t.reshape(-1, 1), y.reshape(-1, 1)
+                    #     fty = model.f(t=t, y=y).reshape(num, num)
+                    #     dt = torch.zeros(num, num).fill_(dt).to(device)
+                    #     dy = fty * dt
+                    #     dt_, dy_, t_, y_ = dt.cpu().numpy(), dy.cpu().numpy(), t.cpu().numpy(), y.cpu().numpy()
+                    #     plt.quiver(t_, y_, dt_, dy_, alpha=0.3, edgecolors='k', width=0.0035, scale=50)
+                    #
+                    # if args.hide_ticks:
+                    #     plt.xticks([], [])
+                    #     plt.yticks([], [])
+                    # plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
+                    # plt.ylim(ylims)
+                    # plt.xlabel('$t$')
+                    # plt.ylabel('$Y_t$')
+                    # plt.tight_layout()
+                    # plt.savefig(img_path, dpi=args.dpi)
+                    # plt.close()
+                    # logging.info(f'Saved figure at: {img_path}')
 
-                if args.show_arrows:
-                    num, dt = 12, 0.12
-                    t, y = torch.meshgrid(
-                        [torch.linspace(0.2, 1.8, num).to(device), torch.linspace(-1.5, 1.5, num).to(device)]
-                    )
-                    t, y = t.reshape(-1, 1), y.reshape(-1, 1)
-                    fty = model.f(t=t, y=y).reshape(num, num)
-                    dt = torch.zeros(num, num).fill_(dt).to(device)
-                    dy = fty * dt
-                    dt_, dy_, t_, y_ = dt.cpu().numpy(), dy.cpu().numpy(), t.cpu().numpy(), y.cpu().numpy()
-                    plt.quiver(t_, y_, dt_, dy_, alpha=0.3, edgecolors='k', width=0.0035, scale=50)
-
-                if args.hide_ticks:
-                    plt.xticks([], [])
-                    plt.yticks([], [])
-                plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
-                plt.ylim(ylims)
-                plt.xlabel('$t$')
-                plt.ylabel('$Y_t$')
-                plt.tight_layout()
-                plt.savefig(img_path, dpi=args.dpi)
-                plt.close()
-                logging.info(f'Saved figure at: {img_path}')
-
-                if args.save_ckpt:
-                    torch.save(
-                        {'model': model.state_dict(),
-                         'optimizer': optimizer.state_dict(),
-                         'scheduler': scheduler.state_dict(),
-                         'kl_scheduler': kl_scheduler},
-                        os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
-                    )
+                    if args.save_ckpt:
+                        torch.save(
+                            {'model': model.state_dict(),
+                             'optimizer': optimizer.state_dict(),
+                             'scheduler': scheduler.state_dict(),
+                             'kl_scheduler': kl_scheduler},
+                            os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
+                        )
 
         # Train.
         optimizer.zero_grad()
-        zs, kl = model(ts=ts_ext, batch_size=args.batch_size)
-        zs = zs.squeeze()
-        zs = zs[1:-1]  # Drop first and last which are only used to penalize out-of-data region and spread uncertainty.
+        for t1, t2, u1, u2, y1, y2 in train_data_loader:
+            batch_size, length, _ = y1.shape
+            t, u, y = torch.cat([t1, t2], dim=1), torch.cat([u1, u2], dim=1), torch.cat([y1, y2], dim=1)
+            t, u, y = t.to(device), u.to(device), y.to(device)
+            t, u, y = t.transpose(0, 1), u.transpose(0, 1), y.transpose(0, 1)
+            zs, kl = model(t=t, u=u, y=y, batch_size=batch_size)
+            # zs = zs.squeeze()
+            zs = zs[1:-1]  # Drop first and last which are only used to penalize out-of-data region and spread uncertainty.
 
-        likelihood_constructor = {"laplace": distributions.Laplace, "normal": distributions.Normal}[args.likelihood]
-        likelihood = likelihood_constructor(loc=zs, scale=args.scale)
-        logpy = likelihood.log_prob(ys).sum(dim=0).mean(dim=0)
+            likelihood_constructor = {"laplace": distributions.Laplace, "normal": distributions.Normal}[args.likelihood]
+            likelihood = likelihood_constructor(loc=zs, scale=args.scale)
+            logpy = likelihood.log_prob(ys).sum(dim=0).mean(dim=0)
 
-        loss = -logpy + kl * kl_scheduler.val
-        loss.backward()
+            loss = -logpy + kl * kl_scheduler.val
+            loss.backward()
 
-        optimizer.step()
-        scheduler.step()
-        kl_scheduler.step()
+            optimizer.step()
+            scheduler.step()
+            kl_scheduler.step()
 
-        logpy_metric.step(logpy)
-        kl_metric.step(kl)
-        loss_metric.step(loss)
+            logpy_metric.step(logpy)
+            kl_metric.step(kl)
+            loss_metric.step(loss)
 
-        logging.info(
-            f'global_step: {global_step}, '
-            f'logpy: {logpy_metric.val:.3f}, '
-            f'kl: {kl_metric.val:.3f}, '
-            f'loss: {loss_metric.val:.3f}'
-        )
+            logging.info(
+                f'global_step: {global_step}, '
+                f'logpy: {logpy_metric.val:.3f}, '
+                f'kl: {kl_metric.val:.3f}, '
+                f'loss: {loss_metric.val:.3f}'
+            )
 
 
 if __name__ == '__main__':
@@ -420,6 +458,10 @@ if __name__ == '__main__':
     parser.add_argument('--save-ckpt', type=str2bool, default=False, const=True, nargs="?")
 
     parser.add_argument('--data', type=str, default='segmented_cosine', choices=['segmented_cosine', 'irregular_sine'])
+
+    # add boolean arguments
+    parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
+    parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
     parser.add_argument('--u_size', type=int, default=1, help='Size of input')
     parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
@@ -457,6 +499,6 @@ if __name__ == '__main__':
     ckpt_dir = os.path.join(args.train_dir, 'ckpts')
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    sdeint_fn = torchsde.sdeint_adjoint if args.adjoint else torchsde.sdeint
+    sdeint_fn = torchsde.sdeint
 
     main()

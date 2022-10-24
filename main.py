@@ -110,7 +110,8 @@ def main(
         key_i = jrandom.split(key_i, batch_size)
         pred_y = jax.vmap(model.sample)(ts_history_test_i, observation_history_test_i, external_input_history_test_i,
                  ts_forward_test_i, external_input_forward_test_i, key=key_i)
-        rmse_sum = jnp.sum(jnp.sqrt(jnp.mean((pred_y - observation_forward_test_i) ** 2, axis=1)))
+        # rmse_sum = jnp.sum(jnp.sqrt(jnp.mean((pred_y - observation_forward_test_i) ** 2, axis=1)))
+        rmse_sum = RMSE_jnp(observation_forward_test_i, pred_y) * batch_size
         return pred_y, rmse_sum, batch_size
 
     optim = optax.adam(lr)
