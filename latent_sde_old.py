@@ -1,6 +1,3 @@
-#!/usr/bin/python
-# -*- coding:utf8 -*-
-
 # Copyright 2020 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -87,104 +84,67 @@ def _stable_division(a, b, epsilon=1e-7):
 
 class LatentSDE(torchsde.SDEIto):
 
-    def __init__(self, h_size, y_size, u_size, theta=1.0, mu=0.0, sigma=0.5, ):
+    def __init__(self, theta=1.0, mu=0.0, sigma=0.5):
         super(LatentSDE, self).__init__(noise_type="diagonal")
-
-        self.y_size, self.u_size, self. h_size = y_size, u_size, h_size
+        logvar = math.log(sigma ** 2 / (2. * theta))
 
         # Prior drift.
-        # self.register_buffer("theta", torch.tensor([[theta]]))
-        # self.register_buffer("mu", torch.tensor([[mu]]))
-        # self.register_buffer("sigma", torch.tensor([[sigma]]))
-        adaptive_theta = torch.nn.Parameter(torch.tensor([[theta]]), requires_grad=True)
-        self.register_buffer("theta", adaptive_theta)
-
-        self.mu = torch.nn.Sequential(
-            torch.nn.Linear(h_size + u_size, 2 * h_size),
-            torch.nn.Tanh(),
-            torch.nn.Linear(2 * h_size, h_size)
-        )
-        # self.register_buffer("sigma", torch.tensor([[sigma]]))
-        self.sigma = torch.nn.Sequential(
-            torch.nn.Linear(h_size + u_size, 2 * h_size),
-            torch.nn.Tanh(),
-            torch.nn.Linear(2 * h_size, h_size),
-            nn.Softplus()
-        )
-
-        # Posterior drift.
-        # self.register_buffer("logvar", torch.tensor([[logvar]]))
-        # self.logvar = torch.nn.Sequential(
-        #     torch.nn.Linear(1, 1),
-        #     torch.nn.Tanh(),
-        #     torch.nn.Linear(1, 1)
-        # )
-        # self.register_buffer("sigma", torch.tensor([[sigma]]))
+        self.register_buffer("theta", torch.tensor([[theta]]))
+        self.register_buffer("mu", torch.tensor([[mu]]))
+        self.register_buffer("sigma", torch.tensor([[sigma]]))
 
         # p(y0).
-        self.register_buffer("py0_mean", nn.Parameter(torch.zeros(h_size), requires_grad=True))
-        self.register_buffer("py0_logvar", nn.Parameter(torch.zeros(h_size), requires_grad=True))
+        self.register_buffer("py0_mean", torch.tensor([[mu]]))
+        self.register_buffer("py0_logvar", torch.tensor([[logvar]]))
 
         # Approximate posterior drift: Takes in 2 positional encodings and the state.
         self.net = nn.Sequential(
-            nn.Linear(h_size, y_size, u_size, 2*h_size),
+            nn.Linear(3, 200),
             nn.Tanh(),
-            nn.Linear(2*h_size, 2*h_size),
+            nn.Linear(200, 200),
             nn.Tanh(),
-            nn.Linear(2*h_size, h_size)
+            nn.Linear(200, 1)
         )
         # Initialization trick from Glow.
         self.net[-1].weight.data.fill_(0.)
         self.net[-1].bias.data.fill_(0.)
 
         # q(y0).
-        self.qy0_mean = nn.Parameter(torch.zeros(h_size), requires_grad=True)
-        self.qy0_logvar = nn.Parameter(torch.zeros(h_size), requires_grad=True)
+        self.qy0_mean = nn.Parameter(torch.tensor([[mu]]), requires_grad=True)
+        self.qy0_logvar = nn.Parameter(torch.tensor([[logvar]]), requires_grad=True)
 
-    def update_u(self, ts, u):
-        self.u_inter = u
-
-    def update_y(self, ts, y):
-        self.y_inter = y
-
-    def f(self, t, h):  # Approximate posterior drift.
-        # if t.dim() == 0:
-        #     t = torch.full_like(y, fill_value=t)
-
-        return self.net(torch.cat([h, self.u_inter(t), self.y_inter(t)], dim=-1))
+    def f(self, t, y):  # Approximate posterior drift.
+        if t.dim() == 0:
+            t = torch.full_like(y, fill_value=t)
         # Positional encoding in transformers for time-inhomogeneous posterior.
-        # return self.net(torch.cat((torch.sin(t), torch.cos(t), y), dim=-1))
+        return self.net(torch.cat((torch.sin(t), torch.cos(t), y), dim=-1))
 
-    def g(self, t, h):  # Shared diffusion.
-        return self.sigma(torch.cat([h, self.u_inter(t)], dim=-1))
-        # return self.sigma.repeat(y.size(0), 1)
+    def g(self, t, y):  # Shared diffusion.
+        return self.sigma.repeat(y.size(0), 1)
 
-    def h(self, t, h):  # Prior drift
-        target = self.mu(torch.cat([h, self.u_inter(t)], dim=-1))
-        return self.theta * (target - h)
+    def h(self, t, y):  # Prior drift.
+        return self.theta * (self.mu - y)
 
     def f_aug(self, t, y):  # Drift for augmented dynamics with logqp term.
-        y = y[:, :self.h_size]
+        y = y[:, 0:1]
         f, g, h = self.f(t, y), self.g(t, y), self.h(t, y)
         u = _stable_division(f - h, g)
         f_logqp = .5 * (u ** 2).sum(dim=1, keepdim=True)
         return torch.cat([f, f_logqp], dim=1)
 
     def g_aug(self, t, y):  # Diffusion for augmented dynamics with logqp term.
-        y = y[:, :self.h_size]
+        y = y[:, 0:1]
         g = self.g(t, y)
-        g_logqp = torch.zeros_like(y[:, self.h_size:])
+        g_logqp = torch.zeros_like(y)
         return torch.cat([g, g_logqp], dim=1)
 
-    def forward(self, ts, ys, us, batch_size, eps=None):
-        eps = torch.randn(batch_size, self.h_size).to(self.qy0_std) if eps is None else eps
+    def forward(self, ts, batch_size, eps=None):
+        eps = torch.randn(batch_size, 1).to(self.qy0_std) if eps is None else eps
         y0 = self.qy0_mean + eps * self.qy0_std
         qy0 = distributions.Normal(loc=self.qy0_mean, scale=self.qy0_std)
         py0 = distributions.Normal(loc=self.py0_mean, scale=self.py0_std)
         logqp0 = distributions.kl_divergence(qy0, py0).sum(dim=1)  # KL(t=0).
 
-        self.update_u(ts, us)
-        self.update_y(ts, ys)
         aug_y0 = torch.cat([y0, torch.zeros(batch_size, 1).to(y0)], dim=1)
         aug_ys = sdeint_fn(
             sde=self,
@@ -197,21 +157,18 @@ class LatentSDE(torchsde.SDEIto):
             atol=args.atol,
             names={'drift': 'f_aug', 'diffusion': 'g_aug'}
         )
-        ys, logqp_path = aug_ys[:, :, 0:self.h_size], aug_ys[-1, :, -1]
+        ys, logqp_path = aug_ys[:, :, 0:1], aug_ys[-1, :, 1]
         logqp = (logqp0 + logqp_path).mean(dim=0)  # KL(t=0) + KL(path).
         return ys, logqp
 
-    def sample_p(self, ts, us, batch_size, y0=None, eps=None, bm=None):
-        self.update_u(ts, us)
-        eps = torch.randn(batch_size, self.h_size).to(self.py0_mean) if eps is None else eps
-        y0 = self.py0_mean + eps * self.py0_std if y0 is None else y0
+    def sample_p(self, ts, batch_size, eps=None, bm=None):
+        eps = torch.randn(batch_size, 1).to(self.py0_mean) if eps is None else eps
+        y0 = self.py0_mean + eps * self.py0_std
         return sdeint_fn(self, y0, ts, bm=bm, method='srk', dt=args.dt, names={'drift': 'h'})
 
-    def sample_q(self, ts, us, ys, batch_size, y0=None, eps=None, bm=None):
-        self.update_u(ts, us)
-        self.update_y(ts, ys)
-        eps = torch.randn(batch_size, self.h_size).to(self.qy0_mean) if eps is None else eps
-        y0 = self.qy0_mean + eps * self.qy0_std if y0 is None else y0
+    def sample_q(self, ts, batch_size, eps=None, bm=None):
+        eps = torch.randn(batch_size, 1).to(self.qy0_mean) if eps is None else eps
+        y0 = self.qy0_mean + eps * self.qy0_std
         return sdeint_fn(self, y0, ts, bm=bm, method='srk', dt=args.dt)
 
     @property
@@ -289,7 +246,7 @@ def main():
     )  # We need space-time Levy area to use the SRK solver
 
     # Model.
-    model = LatentSDE(args.h_size, args.y_size, args.u_size).to(device)
+    model = LatentSDE().to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=.999)
     kl_scheduler = LinearScheduler(iters=args.kl_anneal_iters)
@@ -362,6 +319,7 @@ def main():
                 if args.hide_ticks:
                     plt.xticks([], [])
                     plt.yticks([], [])
+
                 plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
                 plt.ylim(ylims)
                 plt.xlabel('$t$')
@@ -421,13 +379,10 @@ if __name__ == '__main__':
 
     parser.add_argument('--data', type=str, default='segmented_cosine', choices=['segmented_cosine', 'irregular_sine'])
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
-    parser.add_argument('--u_size', type=int, default=1, help='Size of input')
-    parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
-    parser.add_argument('--h_size', type=int, default=16, help='Size of hidden state in SDE.')
     parser.add_argument('--train-iters', type=int, default=5000, help='Number of iterations for training.')
     parser.add_argument('--pause-iters', type=int, default=50, help='Number of iterations before pausing.')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
-    parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='normal')
+    parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='laplace')
     parser.add_argument('--scale', type=float, default=0.05, help='Scale parameter of Normal and Laplace.')
 
     parser.add_argument('--adjoint', type=str2bool, default=False, const=True, nargs="?")
