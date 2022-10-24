@@ -17,7 +17,7 @@
 
 """Latent SDE fit to a single time series with uncertainty quantification."""
 import argparse
-from common import Intepolation
+from common import Intepolation, RMSE_torch, sdeint_fn_batched
 from dataset import select_dataset
 
 import logging
@@ -26,6 +26,7 @@ import os
 import random
 from collections import namedtuple
 from typing import Optional, Union
+from interpolation import KernelInterpolation
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -149,14 +150,18 @@ class LatentSDE(torchsde.SDEIto):
         self.h2y = nn.Sequential(
             nn.Linear(h_size, 2*h_size),
             nn.Tanh(),
-            nn.Linear(y_size)
+            nn.Linear(2*h_size, y_size)
         )
 
     def update_u(self, ts, u):
-        self.u_inter = Intepolation(u, ts)
+        if ts.ndim == 2:
+            ts = ts.unsqueeze(dim=-1)
+        self.u_inter = KernelInterpolation(ts, u)
 
     def update_y(self, ts, y):
-        self.y_inter = Intepolation(y, ts)
+        if ts.ndim == 2:
+            ts = ts.unsqueeze(dim=-1)
+        self.y_inter = KernelInterpolation(ts, y)
 
     def f(self, t, h):  # Approximate posterior drift.
         # if t.dim() == 0:
@@ -197,17 +202,20 @@ class LatentSDE(torchsde.SDEIto):
         self.update_u(ts, us)
         self.update_y(ts, ys)
         aug_y0 = torch.cat([y0, torch.zeros(batch_size, 1).to(y0)], dim=1)
-        aug_ys = sdeint_fn(
-            sde=self,
-            y0=aug_y0,
-            ts=ts,
-            method=args.method,
-            dt=args.dt,
-            adaptive=args.adaptive,
-            rtol=args.rtol,
-            atol=args.atol,
-            names={'drift': 'f_aug', 'diffusion': 'g_aug'}
-        )
+        # aug_ys = sdeint_fn(
+        #     sde=self,
+        #     y0=aug_y0,
+        #     ts=ts,
+        #     method=args.method,
+        #     dt=args.dt,
+        #     adaptive=args.adaptive,
+        #     rtol=args.rtol,
+        #     atol=args.atol,
+        #     names={'drift': 'f_aug', 'diffusion': 'g_aug'}
+        # )
+        aug_ys = sdeint_fn_batched(self, aug_y0, ts, sdeint_fn, method=args.method, dt=args.dt, adaptive=args.adaptive,
+                          rtol=args.rtol, atol=args.atol, names={'drift': 'f_aug', 'diffusion': 'g_aug'})
+
         ys, logqp_path = aug_ys[:, :, 0:self.h_size], aug_ys[-1, :, -1]
         logqp = (logqp0 + logqp_path).mean(dim=0)  # KL(t=0) + KL(path).
         return ys, logqp
@@ -216,14 +224,18 @@ class LatentSDE(torchsde.SDEIto):
         self.update_u(ts, us)
         eps = torch.randn(batch_size, self.h_size).to(self.py0_mean) if eps is None else eps
         y0 = self.py0_mean + eps * self.py0_std if y0 is None else y0
-        return sdeint_fn(self, y0, ts, bm=bm, method='srk', dt=args.dt, names={'drift': 'h'})
+        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method='srk', dt=args.dt, names={'drift': 'h'})
+        # return sdeint_fn_batched(self, y0, ts, sdeint_fn, method=args.method, dt=args.dt, names={'drift': 'h'})
 
     def sample_q(self, ts, us, ys, batch_size, y0=None, eps=None, bm=None):
         self.update_u(ts, us)
         self.update_y(ts, ys)
         eps = torch.randn(batch_size, self.h_size).to(self.qy0_mean) if eps is None else eps
         y0 = self.qy0_mean + eps * self.qy0_std if y0 is None else y0
-        return sdeint_fn(self, y0, ts, bm=bm, method='srk', dt=args.dt)
+        return sdeint_fn(self, y0, ts[:, 0], bm=bm, method='srk', dt=args.dt)
+        # return sdeint_fn_batched(self, y0, ts, sdeint_fn, method=args.method, dt=args.dt)
+
+
 
     @property
     def py0_std(self):
@@ -275,19 +287,9 @@ def make_self_dataset(data_name, ct_time, sp, batch_size):
 
     return train_data_loader, test_data_loader
 
-
-
-def make_data():
-    data_constructor = {
-        'segmented_cosine': make_segmented_cosine_data,
-        'irregular_sine': make_irregular_sine_data
-    }[args.data]
-    return data_constructor()
-
-
 def main():
     # Dataset.
-    ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_ = make_data()
+    # ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_ = make_data()
 
     train_data_loader, test_data_loader = make_self_dataset(args.data, args.ct_time, args.sp, args.batch_size)
 
@@ -310,6 +312,12 @@ def main():
         num_samples = len(sample_colors)
 
     eps = torch.randn(vis_batch_size, 1).to(device)  # Fix seed for the random draws used in the plots.
+    if args.data == "cstr":
+        args.u_size, args.y_size = 1, 2
+    elif args.data == "winding":
+        args.u_size, args.y_size = 8, 2
+    elif args.data == 'thickener':
+        args.u_size, args.y_size = 8, 1
 
     # Model.
     model = LatentSDE(args.h_size, args.y_size, args.u_size).to(device)
@@ -352,6 +360,7 @@ def main():
 
             with torch.no_grad():
                 # for i, (ts, ys) in enumerate(test_data_loader):
+                rmse_sum = 0
                 for i, (t1, t2, u1, u2, y1, y2) in enumerate(train_data_loader):
                     batch_size, length, _ = y1.shape
                     t1, t2, u1, u2, y1, y2 = [trans(x, device) for x in [t1, t2, u1, u2, y1, y2]]
@@ -360,58 +369,19 @@ def main():
                     zs = model.sample_p(t2, u2, batch_size=batch_size, y0=ys[-1])
                     pred_ys = model.h2y(zs)
 
-                    rmse_sum = torch.sum(torch.sqrt(torch.mean((pred_ys - y2) ** 2, dim=0)))
+                    rmse_sum += RMSE_torch(y2, pred_ys) * batch_size
+                    sum_bs = sum_bs + batch_size
 
-                    # samples = zs[:, vis_idx]
-                    # ts_vis_, zs_, samples_ = ts_vis.cpu().numpy(), zs.cpu().numpy(), samples.cpu().numpy()
-                    # zs_ = np.sort(zs_, axis=1)
-                    # plt.subplot(frameon=False)
-                    #
-                    # if args.show_percentiles:
-                    #     for alpha, percentile in zip(alphas, percentiles):
-                    #         idx = int((1 - percentile) / 2. * vis_batch_size)
-                    #         zs_bot_, zs_top_ = zs_[:, idx], zs_[:, -idx]
-                    #         plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
-                    #
-                    # if args.show_mean:
-                    #     plt.plot(ts_vis_, zs_.mean(axis=1), color=mean_color)
-                    #
-                    # if args.show_samples:
-                    #     for j in range(num_samples):
-                    #         plt.plot(ts_vis_, samples_[:, j], color=sample_colors[j], linewidth=1.0)
-                    #
-                    # if args.show_arrows:
-                    #     num, dt = 12, 0.12
-                    #     t, y = torch.meshgrid(
-                    #         [torch.linspace(0.2, 1.8, num).to(device), torch.linspace(-1.5, 1.5, num).to(device)]
-                    #     )
-                    #     t, y = t.reshape(-1, 1), y.reshape(-1, 1)
-                    #     fty = model.f(t=t, y=y).reshape(num, num)
-                    #     dt = torch.zeros(num, num).fill_(dt).to(device)
-                    #     dy = fty * dt
-                    #     dt_, dy_, t_, y_ = dt.cpu().numpy(), dy.cpu().numpy(), t.cpu().numpy(), y.cpu().numpy()
-                    #     plt.quiver(t_, y_, dt_, dy_, alpha=0.3, edgecolors='k', width=0.0035, scale=50)
-                    #
-                    # if args.hide_ticks:
-                    #     plt.xticks([], [])
-                    #     plt.yticks([], [])
-                    # plt.scatter(ts_, ys_, marker='x', zorder=3, color='k', s=35)  # Data.
-                    # plt.ylim(ylims)
-                    # plt.xlabel('$t$')
-                    # plt.ylabel('$Y_t$')
-                    # plt.tight_layout()
-                    # plt.savefig(img_path, dpi=args.dpi)
-                    # plt.close()
-                    # logging.info(f'Saved figure at: {img_path}')
+            print(f"RMSE: {rmse_sum / sum_bs}")
 
-                    if args.save_ckpt:
-                        torch.save(
-                            {'model': model.state_dict(),
-                             'optimizer': optimizer.state_dict(),
-                             'scheduler': scheduler.state_dict(),
-                             'kl_scheduler': kl_scheduler},
-                            os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
-                        )
+            if args.save_ckpt:
+                torch.save(
+                    {'model': model.state_dict(),
+                     'optimizer': optimizer.state_dict(),
+                     'scheduler': scheduler.state_dict(),
+                     'kl_scheduler': kl_scheduler},
+                    os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
+                )
 
         # Train.
         optimizer.zero_grad()
@@ -446,7 +416,6 @@ def main():
                 f'loss: {loss_metric.val:.3f}'
             )
 
-
 if __name__ == '__main__':
     # The argparse format supports both `--boolean-argument` and `--boolean-argument True`.
     # Trick from https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse.
@@ -457,16 +426,14 @@ if __name__ == '__main__':
     parser.add_argument('--train-dir', type=str, required=True)
     parser.add_argument('--save-ckpt', type=str2bool, default=False, const=True, nargs="?")
 
-    parser.add_argument('--data', type=str, default='segmented_cosine', choices=['segmented_cosine', 'irregular_sine'])
-
-    # add boolean arguments
+    parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickening'])
     parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
     parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
     parser.add_argument('--u_size', type=int, default=1, help='Size of input')
     parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
     parser.add_argument('--h_size', type=int, default=16, help='Size of hidden state in SDE.')
-    parser.add_argument('--train-iters', type=int, default=5000, help='Number of iterations for training.')
+    parser.add_argument('--train-epochs', type=int, default=500, help='Number of epochs for training.')
     parser.add_argument('--pause-iters', type=int, default=50, help='Number of iterations before pausing.')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
     parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='normal')

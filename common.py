@@ -103,9 +103,15 @@ def sdeint_fn_batched(model, y0, ts, sdeint_fn, method='euler', dt=1e-2, adaptiv
     class BatchedSDE:
         def __init__(self, model, names, dT):
             self.model = model
+            self.noise_type = model.noise_type
             self.ori_drift = getattr(model, names['drift'])
             self.ori_diffusion = getattr(model, names['diffusion'])
             self.dT = dT
+
+            # copy attributes in model to self
+            for attr in dir(model):
+                if not attr.startswith('__'):
+                    setattr(self, attr, getattr(model, attr))
             setattr(self, names['drift'], self.f_reparameterization)
             setattr(self, names['diffusion'], self.g_reparameterization)
 
@@ -152,7 +158,7 @@ class Intepolation:
         self.X = torchcde.CubicSpline(coeffs)
 
     def __call__(self, t):
-        return self.X(t)
+        return self.X.evaluate(t)
 
 
 def RMSE_torch(y_gt, y_pred):
@@ -184,13 +190,21 @@ def RMSE_jnp(y_gt, y_pred):
         raise AttributeError
 
 if __name__ == '__main__':
-    a = np.random.randn(3, 3)
-    b = np.random.randn(3, 3)
-    y_gt = jnp.array(a)
-    y_pred = jnp.array(b)
+    # a = np.random.randn(3, 3)
+    # b = np.random.randn(3, 3)
+    # y_gt = jnp.array(a)
+    # y_pred = jnp.array(b)
+    #
+    # y_gt_t = torch.from_numpy(a)
+    # y_pred_t = torch.from_numpy(b)
+    #
+    # print(RMSE_jnp(y_gt, y_pred))
+    # print(RMSE_torch(y_gt_t, y_pred_t))
+    X = torch.randn((3, 3, 3))
+    t = torch.linspace(0,1,3).reshape((3,1,1)).repeat((1,3,1))
+    print(X.shape, t.shape)
+    inter = Intepolation(X, t)
+    pos = torch.mean(t, dim=1)
+    print(inter(pos).shape)
 
-    y_gt_t = torch.from_numpy(a)
-    y_pred_t = torch.from_numpy(b)
 
-    print(RMSE_jnp(y_gt, y_pred))
-    print(RMSE_torch(y_gt_t, y_pred_t))
