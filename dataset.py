@@ -84,7 +84,7 @@ def select_dataset(dataset_name, ct_time, sp):
         test_path = 'data/cstr/cstr_test.csv'
         history_length = 60
         forward_length = 180
-        dataset_window = 5
+        dataset_window = 2
         input_dim = 1
         output_dim = 2
 
