@@ -292,7 +292,7 @@ def main():
     elif args.data == "winding":
         args.u_size, args.y_size = 5, 2
     elif args.data == 'thickener':
-        args.u_size, args.y_size = 8, 1
+        args.u_size, args.y_size = 4, 1
 
     # Model.
     model = LatentSDE(args.h_size, args.y_size, args.u_size).to(device)
@@ -412,7 +412,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-ckpt', type=str2bool, default=False, const=True, nargs="?")
     parser.add_argument('--eval', type=str2bool, default=True, const=True, nargs="?")
 
-    parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickening'])
+    parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickener'])
     parser.add_argument('--inter', type=str, default='gp', choices=['gp', 'cubic'])
     parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
     parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
@@ -420,7 +420,7 @@ if __name__ == '__main__':
     parser.add_argument('--u_size', type=int, default=1, help='Size of input')
     parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
     parser.add_argument('--h_size', type=int, default=16, help='Size of hidden state in SDE.')
-    parser.add_argument('--train-epochs', type=int, default=500, help='Number of epochs for training.')
+    parser.add_argument('--train-epochs', type=int, default=800, help='Number of epochs for training.')
     parser.add_argument('--pause-iters', type=int, default=5, help='Number of iterations before pausing.')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
     parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='normal')
