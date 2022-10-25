@@ -441,7 +441,7 @@ if __name__ == '__main__':
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
     parser.add_argument('--u_size', type=int, default=1, help='Size of input')
     parser.add_argument('--y_size', type=int, default=1, help='Size of y.')
-    parser.add_argument('--h_size', type=int, default=16, help='Size of hidden state in SDE.')
+    parser.add_argument('--h_size', type=int, default=32, help='Size of hidden state in SDE.')
     parser.add_argument('--train-epochs', type=int, default=800, help='Number of epochs for training.')
     parser.add_argument('--pause-iters', type=int, default=5, help='Number of iterations before pausing.')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
