@@ -5,6 +5,7 @@ import time
 from common import *
 from func import Func
 
+
 class LatentODE(eqx.Module):
     func: Func
     rnn_cell: eqx.nn.GRUCell
@@ -91,8 +92,10 @@ class LatentODE(eqx.Module):
 
     # Run just the decoder during inference.
     def sample(self, ts_history_test_i, observation_history_test_i, external_input_history_test_i, ts_forward_test_i,
-             external_input_forward_test_i, *, key):
+               external_input_forward_test_i, *, key):
         # ts_history_test_i, observation_history_test_i, external_input_history_test_i, ts_forward_test_i,
         # observation_forward_test_i, external_input_forward_test_i
-        latent, mean, std = self._latent(ts_history_test_i, observation_history_test_i, external_input_history_test_i, key)
-        return self._sample(ts_forward_test_i, external_input_forward_test_i, latent)
+        latent, mean, std = self._latent(ts_history_test_i, observation_history_test_i, external_input_history_test_i,
+                                         key)
+        return self._sample(jnp.concatenate([ts_history_test_i, ts_forward_test_i]),
+                            jnp.concatenate([external_input_history_test_i, external_input_forward_test_i]), latent)
