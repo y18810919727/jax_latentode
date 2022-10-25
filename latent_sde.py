@@ -36,6 +36,8 @@ from torch import distributions, nn, optim
 
 import torchsde
 
+import time
+
 # w/ underscore -> numpy; w/o underscore -> torch.
 Data = namedtuple('Data', ['ts_', 'ts_ext_', 'ts_vis_', 'ts', 'ts_ext', 'ts_vis', 'ys', 'ys_'])
 
@@ -304,6 +306,9 @@ def main():
     kl_metric = EMAMetric()
     loss_metric = EMAMetric()
 
+    best_test = 1e12
+    best_dev_epoch = -1
+
     # if args.show_prior:
     #     with torch.no_grad():
     #         zs = model.sample_p(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
@@ -353,15 +358,32 @@ def main():
             logger.info(
                 f'\n RMSE: {rmse_sum / sum_bs}'
             )
+            epoch_test = rmse_sum / sum_bs
+            if best_test > epoch_test:
+                best_test = epoch_test
+                best_dev_epoch = global_step
+                logger.info('best_test update at epoch = {}'.format(global_step))
+                if args.save_ckpt:
+                    torch.save(
+                        {'model': model.state_dict(),
+                         'optimizer': optimizer.state_dict(),
+                         'scheduler': scheduler.state_dict(),
+                         'kl_scheduler': kl_scheduler},
+                        os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
+                    )
 
-            if args.save_ckpt:
-                torch.save(
-                    {'model': model.state_dict(),
-                     'optimizer': optimizer.state_dict(),
-                     'scheduler': scheduler.state_dict(),
-                     'kl_scheduler': kl_scheduler},
-                    os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
-                )
+            if global_step - best_dev_epoch > args.max_epochs_stop and global_step > args.min_epochs:
+                logger.info('Early stopping at epoch = {}'.format(global_step))
+                break
+
+            # if args.save_ckpt:
+            #     torch.save(
+            #         {'model': model.state_dict(),
+            #          'optimizer': optimizer.state_dict(),
+            #          'scheduler': scheduler.state_dict(),
+            #          'kl_scheduler': kl_scheduler},
+            #         os.path.join(ckpt_dir, f'global_step_{global_step}.ckpt')
+            #     )
 
         # Train.
         optimizer.zero_grad()
@@ -425,6 +447,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size for training.')
     parser.add_argument('--likelihood', type=str, choices=['normal', 'laplace'], default='normal')
     parser.add_argument('--scale', type=float, default=0.05, help='Scale parameter of Normal and Laplace.')
+    parser.add_argument('--max_epochs_stop', type=int, default=50, help='Number of max epochs for training stop')
+    parser.add_argument('--min_epochs', type=int, default=200, help='Number of min epochs for training')
 
     parser.add_argument('--adjoint', type=str2bool, default=False, const=True, nargs="?")
     parser.add_argument('--adaptive', type=str2bool, default=False, const=True, nargs="?")
@@ -453,7 +477,8 @@ if __name__ == '__main__':
     logger = logging.getLogger(__file__)
     logger.setLevel(logging.DEBUG)
 
-    test_log = logging.FileHandler(f'logs/{args.data}.log', 'w', encoding='utf-8')
+    time_now = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(time.time()))
+    test_log = logging.FileHandler(f'logs/{args.data}_{str(time_now)}.log', 'w', encoding='utf-8')
     test_log.setLevel(logging.DEBUG)
 
     stdout_log = logging.StreamHandler()
