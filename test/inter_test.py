@@ -1,6 +1,7 @@
 #!/usr/bin/python
 # -*- coding:utf8 -*-
 from test.interpolation import KernelInterpolation
+from common import Interpolation
 from matplotlib import pyplot as plt
 import torch
 X = torch.randn((5, 10, 2))

@@ -156,7 +156,8 @@ class Interpolation:
         # ts = ts.transpose(0, 1)
         # x = torch.cat([ts, x], dim=-1)
         coeffs = torchcde.hermite_cubic_coefficients_with_backward_differences(x, ts)
-        self.X = torchcde.CubicSpline(coeffs)
+        # coeffs = torchcde.natural_cubic_spline_coeffs(x, t=ts)
+        self.X = torchcde.CubicSpline(coeffs, t=ts)
 
     def __call__(self, t):
         return self.X.evaluate(t)
