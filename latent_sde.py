@@ -209,7 +209,7 @@ class LatentSDE(torchsde.SDEIto):
         aug_ys = sdeint_fn(
             sde=self,
             y0=aug_y0,
-            ts=ts[:,0],
+            ts=ts[:, 0],
             method=args.method,
             dt=args.dt,
             adaptive=args.adaptive,
@@ -219,7 +219,7 @@ class LatentSDE(torchsde.SDEIto):
         )
         # aug_ys = sdeint_fn_batched(self, aug_y0, ts, sdeint_fn, method=args.method, dt=args.dt, adaptive=args.adaptive,
         #                   rtol=args.rtol, atol=args.atol, names={'drift': 'f_aug', 'diffusion': 'g_aug'})
-        ys, logqp_path = aug_ys[:, :, 0:self.h_size], aug_ys[-1, :, -1]
+        ys, logqp_path = aug_ys[:, :, :self.h_size], aug_ys[-1, :, -1]
         logqp = (logqp0 + logqp_path).mean(dim=0)  # KL(t=0) + KL(path).
         return ys, logqp
 
@@ -271,24 +271,7 @@ def main():
     train_data_loader, test_data_loader = make_self_dataset(args.data, args.ct_time, args.sp, args.batch_size)
 
     # Plotting parameters.
-    vis_batch_size = 1024
-    ylims = (-1.75, 1.75)
-    alphas = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
-    percentiles = [0.999, 0.99, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
-    vis_idx = np.random.permutation(vis_batch_size)
     # From https://colorbrewer2.org/.
-    if args.color == "blue":
-        sample_colors = ('#8c96c6', '#8c6bb1', '#810f7c')
-        fill_color = '#9ebcda'
-        mean_color = '#4d004b'
-        num_samples = len(sample_colors)
-    else:
-        sample_colors = ('#fc4e2a', '#e31a1c', '#bd0026')
-        fill_color = '#fd8d3c'
-        mean_color = '#800026'
-        num_samples = len(sample_colors)
-
-    eps = torch.randn(vis_batch_size, 1).to(device)  # Fix seed for the random draws used in the plots.
     if args.data == "cstr":
         args.u_size, args.y_size = 1, 2
     elif args.data == "winding":
@@ -351,7 +334,7 @@ def main():
                     zs = model.sample_p(t2, u2, batch_size=batch_size, y0=ys[-1])
                     pred_ys = model.h2y(zs)
 
-                    rmse_sum += RMSE_torch(y2, pred_ys[...,:2]) * batch_size
+                    rmse_sum += RMSE_torch(y2, pred_ys[..., :model.y_size]) * batch_size
                     sum_bs = sum_bs + batch_size
 
             # print(f"RMSE: {rmse_sum / sum_bs}")
@@ -393,8 +376,7 @@ def main():
             with tr('data'):
                 batch_size, length, _ = y1.shape
                 t, u, y = torch.cat([t1, t2], dim=1), torch.cat([u1, u2], dim=1), torch.cat([y1, y2], dim=1)
-                t, u, y = t.to(device), u.to(device), y.to(device)
-                t, u, y = t.transpose(0, 1), u.transpose(0, 1), y.transpose(0, 1)
+                t, u, y = [trans(x, device) for x in [t, u, y]]
             with tr('forward'):
                 zs, kl = model(t, u, y, batch_size=batch_size)
                 # likelihood_constructor = {"laplace": distributions.Laplace, "normal": distributions.Normal}[args.likelihood]
@@ -435,7 +417,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval', type=str2bool, default=True, const=True, nargs="?")
 
     parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickener'])
-    parser.add_argument('--inter', type=str, default='gp', choices=['gp', 'cubic'])
+    parser.add_argument('--inter', type=str, default='cubic', choices=['gp', 'cubic'])
     parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
     parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
