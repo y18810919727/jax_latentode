@@ -19,6 +19,7 @@ import torch
 import optax
 from datetime import datetime, timezone, timedelta
 
+
 def subsample_indexes(c, time_steps, percentage, evenly=False):
     bs, l, d = c.shape
     n_to_subsample = int(l * percentage)
@@ -177,11 +178,32 @@ def RMSE_torch(y_gt, y_pred):
     else:
         raise AttributeError
 
+
+def RRSE_torch(y_gt, y_pred):
+    assert y_gt.shape == y_pred.shape
+    if len(y_gt.shape) == 3:
+        return torch.mean(
+            torch.stack(
+                [RRSE_torch(y_gt[:, i], y_pred[:, i]) for i in range(y_gt.shape[1])]
+            )
+        )
+
+    elif len(y_gt.shape) == 2:
+        # each shape (n_seq, n_outputs)
+        se = torch.sum((y_gt - y_pred) ** 2, dim=0)
+        rse = se / (torch.sum(
+            (y_gt - torch.mean(y_gt, dim=0)) ** 2, dim=0
+        ) + 1e-6)
+        return torch.mean(torch.sqrt(rse))
+    else:
+        raise AttributeError
+
+
 def RMSE_jnp(y_gt, y_pred):
     if len(y_gt.shape) == 3:
         return jnp.mean(
             jnp.stack(
-                [RMSE_jnp(y_gt[:, i], y_pred[:, i]) for i in range(y_gt.shape[1])]
+                [RMSE_jnp(y_gt[i, :], y_pred[i, :]) for i in range(y_gt.shape[0])]
             )
         )
     elif len(y_gt.shape) == 2:
@@ -190,6 +212,27 @@ def RMSE_jnp(y_gt, y_pred):
         return jnp.mean(rse)
     else:
         raise AttributeError
+
+
+def RRSE_jnp(y_gt, y_pred):
+    assert y_gt.shape == y_pred.shape
+    if len(y_gt.shape) == 3:
+        return jnp.mean(
+            jnp.stack(
+                [RRSE_jnp(y_gt[i, :], y_pred[i, :]) for i in range(y_gt.shape[0])]
+            )
+        )
+
+    elif len(y_gt.shape) == 2:
+        # each shape (n_seq, n_outputs)
+        se = jnp.sum((y_gt - y_pred) ** 2, axis=0)
+        rse = se / (jnp.sum(
+            (y_gt - jnp.mean(y_gt, axis=0)) ** 2, axis=0
+        ) + 1e-6)
+        return jnp.mean(jnp.sqrt(rse))
+    else:
+        raise AttributeError
+
 
 class TimeRecorder:
     def __init__(self):

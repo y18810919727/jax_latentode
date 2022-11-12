@@ -17,7 +17,7 @@
 
 """Latent SDE fit to a single time series with uncertainty quantification."""
 import argparse
-from common import RMSE_torch, sdeint_fn_batched, TimeRecorder
+from common import RMSE_torch, sdeint_fn_batched, TimeRecorder, RRSE_torch
 from dataset import select_dataset
 
 import logging
@@ -248,14 +248,17 @@ class LatentSDE(torchsde.SDEIto):
     def qy0_std(self):
         return torch.exp(.5 * self.qy0_logvar)
 
+
 def make_self_dataset(data_name, ct_time, sp, batch_size):
-    train_all, test_all = select_dataset(data_name, ct_time, sp, batch_size=-1)
+    train_all, test_all = select_dataset(data_name, ct_time, sp, evenly=args.evenly, batch_size=-1)
+
     class Dataset(torch.utils.data.Dataset):
         def __init__(self, arrays):
             self.arrays = arrays
 
         def __getitem__(self, index):
             return tuple(data[index] for data in self.arrays)
+
         def __len__(self):
             return self.arrays[0].shape[0]
 
@@ -264,9 +267,12 @@ def make_self_dataset(data_name, ct_time, sp, batch_size):
 
     return train_data_loader, test_data_loader
 
+
 def main():
     # Dataset.
     # ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_ = make_data()
+
+    logger.info(f"data: {args.data}")
 
     train_data_loader, test_data_loader = make_self_dataset(args.data, args.ct_time, args.sp, args.batch_size)
 
@@ -324,6 +330,7 @@ def main():
             with torch.no_grad():
                 # for i, (ts, ys) in enumerate(test_data_loader):
                 rmse_sum = 0
+                rrse_sum = 0
                 sum_bs = 0
                 for i, (t1, t2, u1, u2, y1, y2) in enumerate(test_data_loader):
                     logger.info(f"eval {len(test_data_loader)}-{i}")
@@ -335,12 +342,19 @@ def main():
                     pred_ys = model.h2y(zs)
 
                     rmse_sum += RMSE_torch(y2, pred_ys[..., :model.y_size]) * batch_size
+                    rrse_sum += RRSE_torch(y2, pred_ys[..., :model.y_size]) * batch_size
                     sum_bs = sum_bs + batch_size
 
             # print(f"RMSE: {rmse_sum / sum_bs}")
             logger.info(
                 f'\n RMSE: {rmse_sum / sum_bs}'
             )
+
+            logger.info(
+                f'\n RRSE: {rrse_sum / sum_bs}'
+            )
+
+            # 用RMSE作为早停标准
             epoch_test = rmse_sum / sum_bs
             if best_test > epoch_test:
                 best_test = epoch_test
@@ -419,6 +433,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='cstr', choices=['cstr', 'winding', 'thickener'])
     parser.add_argument('--inter', type=str, default='cubic', choices=['gp', 'cubic'])
     parser.add_argument('--ct_time', type=str2bool, default=True, const=True, nargs="?")
+    parser.add_argument('--evenly', type=str2bool, default=False)
     parser.add_argument('--sp', type=float, default=0.5, help='sp rate.')
     parser.add_argument('--kl-anneal-iters', type=int, default=100, help='Number of iterations for linear KL schedule.')
     parser.add_argument('--u_size', type=int, default=1, help='Size of input')
@@ -460,7 +475,7 @@ if __name__ == '__main__':
     logger.setLevel(logging.DEBUG)
 
     time_now = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(time.time()))
-    test_log = logging.FileHandler(f'logs/{args.data}_{str(time_now)}.log', 'w', encoding='utf-8')
+    test_log = logging.FileHandler(f'logs/latent_sde_{args.data}_sp_{str(args.sp)}_evenly_{str(args.evenly)}_{str(time_now)}.log', 'w', encoding='utf-8')
     test_log.setLevel(logging.DEBUG)
 
     stdout_log = logging.StreamHandler()

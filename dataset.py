@@ -77,7 +77,7 @@ def dataloader(arrays, batch_size, *, key):
         yield tuple(None for _ in arrays)
 
 
-def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
+def select_dataset(dataset_name, ct_time, sp, evenly, batch_size=-1):
     if dataset_name == 'cstr':
         train_path = 'data/cstr/cstr_train.csv'
         val_path = 'data/cstr/cstr_val.csv'
@@ -156,7 +156,7 @@ def select_dataset(dataset_name, ct_time, sp, batch_size=-1):
                                            )
 
     collate_fn = None if not ct_time else \
-        CTSample(sp=sp, history_length=history_length, forward_length=forward_length).batch_collate_fn
+        CTSample(sp=sp, evenly=evenly, history_length=history_length, forward_length=forward_length).batch_collate_fn
 
     def get_jnp_list(data_loader):
         external_input_history, external_input_forward, observation_history, observation_forward = iter(data_loader).next()
